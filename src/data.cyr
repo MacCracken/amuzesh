@@ -1,0 +1,29 @@
+# amuzesh — synthetic fixtures: well-separated Gaussian blobs for tests + demo.
+#
+# Include AFTER lib/ganita.cyr, lib/tyche.cyr.
+
+# Generate k Gaussian blobs of n_per points each in d dims, written into out_X
+# ((k·n_per)×D) and out_y (k·n_per labels). Cluster c is centered at coordinate
+# ((c+1)·10 + axis) on every axis (centers ~14 apart for d=2) with unit-std noise —
+# cleanly separable (≈10σ), so k-means purity and prototype accuracy should be ~1.0.
+# RETURNS the total point count (k·n_per).
+fn amz_make_blobs(n_per, d, k, seed, out_X, out_y): i64 {
+    rng_seed(seed);
+    var ci = 0;
+    while (ci < k) {
+        var pi = 0;
+        while (pi < n_per) {
+            var row = ci * n_per + pi;
+            var c = 0;
+            while (c < d) {
+                var center = f64_from((ci + 1) * 10 + c);
+                ganita_mat_set(out_X, row, c, f64_add(center, rng_normal()));
+                c = c + 1;
+            }
+            store64(out_y + row * 8, ci);
+            pi = pi + 1;
+        }
+        ci = ci + 1;
+    }
+    return k * n_per;
+}

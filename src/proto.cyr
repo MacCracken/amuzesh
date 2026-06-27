@@ -1,0 +1,63 @@
+# amuzesh — nearest-centroid (prototype / Rocchio / nearest-mean) classifier.
+#
+# Supervised, RNG-free. The prototype for class c is the componentwise mean of all
+# training rows labeled c; a query is classified to the nearest prototype. Equivalent
+# to LDA under equal isotropic covariance — the supervised counterpart to k-means.
+#
+# Include AFTER lib/ganita.cyr, src/dist.cyr.
+
+# Fit: prototype[c] = mean of rows with y==c, stored as row c of a C×D ganita matrix.
+# A class with zero training rows keeps the zero prototype (never selected on real data).
+fn amz_proto_fit(X, n, d, y, ncls): i64 {
+    var protos = ganita_mat_new(ncls, d);
+    var counts = alloc(ncls * 8);
+    var j = 0;
+    while (j < ncls) { store64(counts + j * 8, 0); j = j + 1; }
+    var i = 0; var c = 0; var lab = 0;
+    i = 0;
+    while (i < n) {
+        lab = load64(y + i * 8);
+        c = 0;
+        while (c < d) {
+            ganita_mat_set(protos, lab, c, f64_add(ganita_mat_get(protos, lab, c), ganita_mat_get(X, i, c)));
+            c = c + 1;
+        }
+        store64(counts + lab * 8, load64(counts + lab * 8) + 1);
+        i = i + 1;
+    }
+    var cnt = 0; var inv = 0;
+    j = 0;
+    while (j < ncls) {
+        cnt = load64(counts + j * 8);
+        if (cnt > 0) {
+            inv = f64_div(f64_from(1), f64_from(cnt));
+            c = 0;
+            while (c < d) { ganita_mat_set(protos, j, c, f64_mul(ganita_mat_get(protos, j, c), inv)); c = c + 1; }
+        }
+        j = j + 1;
+    }
+    return protos;
+}
+
+# Predict: argmin_c sqdist(query, prototype_c), where query is row rx of matrix Xq.
+fn amz_proto_predict(protos, ncls, d, Xq, rx): i64 {
+    var best = 0; var bestd = amz_sqdist(Xq, rx, protos, 0, d);
+    var c = 1;
+    while (c < ncls) {
+        var dc = amz_sqdist(Xq, rx, protos, c, d);
+        if (f64_lt(dc, bestd) == 1) { bestd = dc; best = c; }
+        c = c + 1;
+    }
+    return best;
+}
+
+# Accuracy over a labeled set (X n×d, y labels): RETURNS f64 fraction correct.
+fn amz_proto_accuracy(protos, ncls, d, X, n, y): i64 {
+    var ok = 0;
+    var i = 0;
+    while (i < n) {
+        if (amz_proto_predict(protos, ncls, d, X, i) == load64(y + i * 8)) { ok = ok + 1; }
+        i = i + 1;
+    }
+    return f64_div(f64_from(ok), f64_from(n));
+}

@@ -1,0 +1,30 @@
+# amuzesh — shared distance / row helpers.
+#
+# These are the ONLY model-level numeric primitives amuzesh adds; everything below
+# them (matrix storage / access, PRNG) comes from ganita + tyche. All values are f64
+# bit patterns stored in i64 (the everything-is-i64 family convention).
+#
+# Include AFTER lib/ganita.cyr (ganita_mat_get).
+
+# Squared euclidean distance between row ra of matrix A and row rb of matrix B over
+# d columns. Uses the public ganita_mat_get accessor — no header-layout assumption.
+fn amz_sqdist(A, ra, B, rb, d): i64 {
+    var acc = f64_from(0);
+    var c = 0;
+    while (c < d) {
+        var diff = f64_sub(ganita_mat_get(A, ra, c), ganita_mat_get(B, rb, c));
+        acc = f64_add(acc, f64_mul(diff, diff));
+        c = c + 1;
+    }
+    return acc;
+}
+
+# Copy row rs of matrix src into row rd of matrix dst (d columns).
+fn amz_copy_row(src, rs, dst, rd, d): i64 {
+    var c = 0;
+    while (c < d) {
+        ganita_mat_set(dst, rd, c, ganita_mat_get(src, rs, c));
+        c = c + 1;
+    }
+    return 0;
+}

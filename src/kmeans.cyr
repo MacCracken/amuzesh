@@ -1,0 +1,189 @@
+# amuzesh — k-means clustering (Lloyd 1957/1982) with k-means++ seeding
+# (Arthur & Vassilvitskii 2007). The genuinely-new content of M0: assignment,
+# centroid update, inertia, the D²-weighted seed walk, and the fit driver. Matrix
+# storage and the PRNG are substrate (ganita / tyche), not reimplemented here.
+#
+# A fitted model is a flat 8-slot record (alloc'd i64 array):
+#   [0]=k  [1]=d  [2]=n  [3]=centroids(K×D mat)  [4]=labels(i64[n])
+#   [5]=inertia(f64)  [6]=iters  [7]=history(i64[max_iter], per-iter inertia f64)
+#
+# Include AFTER lib/ganita.cyr, lib/tyche.cyr, src/dist.cyr.
+
+# ---- k-means++ seeding ------------------------------------------------------
+# Choose k initial centers from X (n×d) D²-weighted, writing the chosen data rows
+# into out_cents (K×D). RNG must be seeded by the caller. tyche has no weighted
+# sampler, so the categorical draw is an inverse-CDF walk over rng_uniform().
+fn amz_kmeans_pp_seed(X, n, d, k, out_cents): i64 {
+    var dist = alloc(n * 8);                              # running nearest-center sq-dist
+    var first = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % n;     # first center: uniform data point
+    amz_copy_row(X, first, out_cents, 0, d);
+    var i = 0;
+    while (i < n) { store64(dist + i * 8, amz_sqdist(X, i, out_cents, 0, d)); i = i + 1; }
+    var c = 1;
+    while (c < k) {
+        var total = f64_from(0);
+        i = 0;
+        while (i < n) { total = f64_add(total, load64(dist + i * 8)); i = i + 1; }
+        var u = f64_mul(rng_uniform(), total);            # draw in [0, total)
+        var cum = f64_from(0); var pick = 0 - 1;
+        i = 0;
+        while (i < n) {
+            cum = f64_add(cum, load64(dist + i * 8));
+            if ((pick < 0) && (f64_gt(cum, u) == 1)) { pick = i; }
+            i = i + 1;
+        }
+        if (pick < 0) { pick = n - 1; }                   # degenerate (total==0) fallback
+        amz_copy_row(X, pick, out_cents, c, d);
+        i = 0;                                            # fold the new center into the running min
+        while (i < n) {
+            var dn = amz_sqdist(X, i, out_cents, c, d);
+            if (f64_lt(dn, load64(dist + i * 8)) == 1) { store64(dist + i * 8, dn); }
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# ---- Lloyd iteration --------------------------------------------------------
+# Assign each point to its nearest centroid; fill out_labels[0..n); RETURN inertia
+# (the sum of the chosen min squared distances) as an f64 bit pattern.
+fn amz_kmeans_assign(X, n, d, cents, k, out_labels): i64 {
+    var inertia = f64_from(0);
+    var i = 0;
+    while (i < n) {
+        var best = 0; var bestd = amz_sqdist(X, i, cents, 0, d);
+        var j = 1;
+        while (j < k) {
+            var dj = amz_sqdist(X, i, cents, j, d);
+            if (f64_lt(dj, bestd) == 1) { bestd = dj; best = j; }
+            j = j + 1;
+        }
+        store64(out_labels + i * 8, best);
+        inertia = f64_add(inertia, bestd);
+        i = i + 1;
+    }
+    return inertia;
+}
+
+# Recompute each centroid as the mean of its assigned points (the SSE minimizer for a
+# fixed assignment). An EMPTY cluster keeps its previous centroid (no divide-by-zero /
+# NaN). RETURN the empty-cluster count.
+fn amz_kmeans_update(X, n, d, labels, k, out_cents): i64 {
+    var sums = ganita_mat_new(k, d);
+    var counts = alloc(k * 8);
+    var j = 0;
+    while (j < k) { store64(counts + j * 8, 0); j = j + 1; }
+    var i = 0; var c = 0; var lab = 0;
+    i = 0;
+    while (i < n) {
+        lab = load64(labels + i * 8);
+        c = 0;
+        while (c < d) {
+            ganita_mat_set(sums, lab, c, f64_add(ganita_mat_get(sums, lab, c), ganita_mat_get(X, i, c)));
+            c = c + 1;
+        }
+        store64(counts + lab * 8, load64(counts + lab * 8) + 1);
+        i = i + 1;
+    }
+    var empty = 0; var cnt = 0; var inv = 0;
+    j = 0;
+    while (j < k) {
+        cnt = load64(counts + j * 8);
+        if (cnt == 0) { empty = empty + 1; }
+        else {
+            inv = f64_div(f64_from(1), f64_from(cnt));
+            c = 0;
+            while (c < d) { ganita_mat_set(out_cents, j, c, f64_mul(ganita_mat_get(sums, j, c), inv)); c = c + 1; }
+        }
+        j = j + 1;
+    }
+    return empty;
+}
+
+# ---- fit driver -------------------------------------------------------------
+# Full Lloyd loop: k-means++ seed, then assign↔update until the label vector reaches a
+# fixed point or max_iter passes. Inertia is recorded AFTER each assign (against the
+# centroids that produced those labels), so the history is directly checkable for the
+# Lloyd non-increasing invariant. RETURNS a model record (see the header).
+fn amz_kmeans_fit(X, n, d, k, max_iter, seed): i64 {
+    rng_seed(seed);
+    var cents = ganita_mat_new(k, d);
+    amz_kmeans_pp_seed(X, n, d, k, cents);
+    var labels = alloc(n * 8);
+    var prev = alloc(n * 8);
+    var history = alloc(max_iter * 8);
+    var i = 0;
+    while (i < n) { store64(prev + i * 8, 0 - 1); i = i + 1; }   # force the first iteration
+    var inertia = f64_from(0);
+    var iters = 0;
+    var converged = 0;
+    while ((iters < max_iter) && (converged == 0)) {
+        inertia = amz_kmeans_assign(X, n, d, cents, k, labels);
+        store64(history + iters * 8, inertia);
+        var same = 1;
+        i = 0;
+        while (i < n) {
+            if (load64(labels + i * 8) != load64(prev + i * 8)) { same = 0; }
+            i = i + 1;
+        }
+        if (same == 1) { converged = 1; }
+        else {
+            amz_kmeans_update(X, n, d, labels, k, cents);
+            i = 0;
+            while (i < n) { store64(prev + i * 8, load64(labels + i * 8)); i = i + 1; }
+        }
+        iters = iters + 1;
+    }
+    var model = alloc(8 * 8);
+    store64(model + 0 * 8, k);
+    store64(model + 1 * 8, d);
+    store64(model + 2 * 8, n);
+    store64(model + 3 * 8, cents);
+    store64(model + 4 * 8, labels);
+    store64(model + 5 * 8, inertia);
+    store64(model + 6 * 8, iters);
+    store64(model + 7 * 8, history);
+    return model;
+}
+
+# ---- model accessors --------------------------------------------------------
+fn amz_model_k(m): i64         { return load64(m + 0 * 8); }
+fn amz_model_d(m): i64         { return load64(m + 1 * 8); }
+fn amz_model_n(m): i64         { return load64(m + 2 * 8); }
+fn amz_model_centroids(m): i64 { return load64(m + 3 * 8); }
+fn amz_model_labels(m): i64    { return load64(m + 4 * 8); }
+fn amz_model_inertia(m): i64   { return load64(m + 5 * 8); }   # f64 bits
+fn amz_model_iters(m): i64     { return load64(m + 6 * 8); }
+fn amz_model_history(m): i64   { return load64(m + 7 * 8); }
+
+# ---- coverage metric --------------------------------------------------------
+# Cluster purity = (1/n) Σ_clusters max_class (#points of that true class in the
+# cluster) — permutation-invariant, so it does not depend on the arbitrary cluster
+# numbering. Returns an f64 fraction in [0,1].
+fn amz_purity(labels, y, n, k, ncls): i64 {
+    var hist = alloc(ncls * 8);
+    var total_major = 0;
+    var j = 0;
+    while (j < k) {
+        var cc = 0;
+        while (cc < ncls) { store64(hist + cc * 8, 0); cc = cc + 1; }
+        var i = 0;
+        while (i < n) {
+            if (load64(labels + i * 8) == j) {
+                var ty = load64(y + i * 8);
+                store64(hist + ty * 8, load64(hist + ty * 8) + 1);
+            }
+            i = i + 1;
+        }
+        var mx = 0;
+        cc = 0;
+        while (cc < ncls) {
+            if (load64(hist + cc * 8) > mx) { mx = load64(hist + cc * 8); }
+            cc = cc + 1;
+        }
+        total_major = total_major + mx;
+        j = j + 1;
+    }
+    return f64_div(f64_from(total_major), f64_from(n));
+}

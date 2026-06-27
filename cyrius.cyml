@@ -1,0 +1,36 @@
+[package]
+name = "amuzesh"
+version = "${file:VERSION}"
+description = "amuzesh — Persian آموزش 'learning'; the AGNOS ML family's first classical / shallow-ML reference in Cyrius (the first NON-deep-learning sibling). Built ON the substrate (ganita linear algebra + tyche PRNG); the novelty budget is the model logic only."
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.2.44"
+repository = "https://github.com/MacCracken/amuzesh"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "build/amuzesh"
+
+# Unlike the deep-learning siblings (attn11 / tarka / tentib / prajna), amuzesh carries
+# NO finite-difference gradient gate: k-means / prototype are not gradient methods.
+# Correctness is proven by convergence (monotone inertia + fixed-point labels),
+# coverage (cluster purity), and accuracy (held-out separable sets) instead.
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
+
+# Dense f64 matrix storage + row access. amuzesh stores X (N×D), centroids (K×D) and
+# class prototypes (C×D) as ganita matrices and reads them via ganita_mat_get/set — it
+# does NOT reimplement any linear algebra.
+[deps.ganita]
+git = "https://github.com/MacCracken/ganita"
+tag = "1.0.1"
+modules = ["dist/ganita.cyr"]
+
+# Deterministic statistical PRNG (xorshift64). k-means++ seeding + the synthetic blob
+# generator. tyche has NO weighted/categorical sampler, so the D²-weighted draw is built
+# locally on rng_uniform() (model logic, in budget).
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "0.1.1"
+modules = ["dist/tyche.cyr"]
