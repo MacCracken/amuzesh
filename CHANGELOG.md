@@ -4,7 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.1] - 2026-08-17
+
+### Changed
+
+- **Cyrius pin `6.2.44` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Suite **23/23**, identical to the pre-bump baseline. Cleared a 3-module shadow warning (patra / mabda / sankoch).
+- **`[deps.tyche]` `0.1.1` -> `1.0.1`** and **`[deps.ganita]` `1.0.1` -> `1.1.0`** — part of the
+  ecosystem-wide substrate-freeze propagation. amuzesh builds its D²-weighted k-means++ draw on
+  `rng_uniform()`, which is inside tyche's frozen 1.x surface, so this is a tag realign with no
+  behavior change. Verified the bumps took rather than merely built — vendored `lib/tyche.cyr`
+  now reads `# Version: 1.0.1` and `lib/ganita.cyr` reads `1.1.0`. Suite **23/23**, unchanged.
+
+## [0.1.0] - 2026-06-27
 
 **M0 — the classical/shallow-ML floor: k-means + k-means++ + nearest-centroid prototype
 classifier.** amuzesh is the AGNOS ML family's first **non-deep-learning** sibling — built ON the

@@ -9,7 +9,9 @@
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.44` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.5.27` (in `cyrius.cyml [package].cyrius`)
+
+**Pin bumped to `6.5.27` 2026-08-17** (ecosystem-wide ML/AI-arc realign, ahead of the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib snapshot; suite re-verified green at the new pin.
 
 ## Source
 
