@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "amuzesh — Persian آموزش 'learning'; the AGNOS ML family's first classical / shallow-ML reference in Cyrius (the first NON-deep-learning sibling). Built ON the substrate (ganita linear algebra + tyche PRNG); the novelty budget is the model logic only."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.27"
+cyrius = "6.6.2"
 repository = "https://github.com/MacCracken/amuzesh"
 
 [build]
