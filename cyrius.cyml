@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "amuzesh — Persian آموزش 'learning'; the AGNOS ML family's first classical / shallow-ML reference in Cyrius (the first NON-deep-learning sibling). Built ON the substrate (ganita linear algebra + tyche PRNG); the novelty budget is the model logic only."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 repository = "https://github.com/MacCracken/amuzesh"
 
 [build]
@@ -30,6 +30,9 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # `1.2.14` → `1.2.15` (6.7.9 realign): the version the 6.7.9 snapshot bundles — again
 # byte-identical to the toolchain's lib/ganita.cyr. Toolchain-only release (6.6.18 → 6.7.5);
 # every function, signature and result is 1.2.14's.
+#
+# Held at `1.2.15` for the 6.7.18 bump: it is ganita's latest tag, and the 6.7.18 snapshot
+# bundles the same bytes.
 [deps.ganita]
 git = "https://github.com/MacCracken/ganita"
 tag = "1.2.15"
@@ -46,7 +49,12 @@ modules = ["dist/ganita.cyr"]
 #
 # `1.1.1` → `1.2.0` (6.7.9 realign): the tyche release built against 6.7.9. No library or
 # API change; tyche's golden dump of the stream is byte-identical to 1.1.1's.
+#
+# `1.2.0` → `1.2.2` (6.7.18 bump, latest tag): 1.2.1 is toolchain-only (→ 6.7.18). 1.2.2 is
+# the hardening sweep: every state the API can reach gives the same bits. A hand-written
+# `_rng_state = 0` now steps as state 1 instead of hanging rng_normal; amuzesh never writes
+# `_rng_state`. rng_uniform becomes `#inline`.
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "1.2.0"
+tag = "1.2.2"
 modules = ["dist/tyche.cyr"]

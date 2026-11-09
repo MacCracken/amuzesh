@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-09
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17), the latest cyrius release. No
+  source change. The 6.7.17 refusal of a statement that is only a value builtin
+  (`f64_sqrt(x);`) does not reach amuzesh: its only bare call statements are
+  `rng_seed(seed);`, a tyche function. `cyrius lib sync --full` re-vendored the 6.7.18 snapshot:
+  `lib/` byte-matches it, the same 113 files as 6.7.9, 66 with new content. Nothing was added
+  or removed. From 6.7.12, a moved pin makes `cyrius deps` / `cyrius build` exit 1 until that
+  sync has run, so the pin, `lib/` and `cyrius.lock` must land in the same commit.
+- **`[deps.tyche]` `1.2.0` → `1.2.2`** (latest tag). 1.2.1 only moves tyche to 6.7.18. 1.2.2 is
+  tyche's hardening sweep: every state the API can reach gives the same bits as 1.2.1, and a
+  hand-written `_rng_state = 0` now steps as state 1 instead of hanging `rng_normal`. amuzesh
+  never writes `_rng_state`. `rng_uniform` (the k-means++ draw) is now `#inline`.
+- **`[deps.ganita]` held at `1.2.15`** — still ganita's latest tag, and the 6.7.18 snapshot
+  bundles the same bytes.
+- **`cyrius.lock` regenerated** — 114 files, the two commit pins and the `cyrius 6.7.18`
+  trailer; `cyrius deps --verify` is clean. 6.7.18 now names the behavior seen at 0.1.3 and
+  0.2.0: it keeps a superseded pin fail-closed (`cyrius.lock keeps tyche@1.2.0's pin … delete
+  cyrius.lock to re-pin`). The lock was deleted and regenerated, as before.
+- Suite **23/23** and the M0 demo gate pass. The demo output is byte-identical to the 6.7.9
+  and 6.6.2 runs. The bench and fuzz stubs pass, `cyrius vet` is clean, and the 6.7.11/12
+  lint warnings fire on nothing in `src/`. `tests/amuzesh.tcyr` still has 9 lines over 120
+  characters; 6.6.20 and 6.7.9 flag the same 9. The binary grows from 286,560 to 290,160 B.
+
 ## [0.2.0] - 2026-11-09
 
 Moves amuzesh onto the cyrius 6.7 series. No source or behavior change.
