@@ -46,6 +46,11 @@ bit-identical to 0.2.1. Centroids and prototypes move by 1–2 ulp, toward the e
   refusals on failure.
 - **Real benchmarks** (`tests/amuzesh.bcyr`, 8 rows), `scripts/bench-history.sh` and
   `bench-history.csv` (the before and after stamps), and `docs/benchmarks.md`.
+- **Roadmap reorganized** (`docs/development/roadmap.md`): the v1.0 criteria with their
+  status (five of seven met at 0.2.2), release rules, the 0.3.x – 1.0.0 milestones
+  (consumable bundle → first consumer → freeze candidate → freeze), and a v1 backlog for the
+  lane's further model classes and the deferred engineering items. Completed items are
+  removed; the CHANGELOG is the record.
 - **Docs**: `docs/api.md`, `docs/sources.md`, `SECURITY.md`, ADRs 0002–0004, architecture
   note 001 (the heap never frees), and the audit report.
 - **CI**: version consistency, fmt `--check`, lint (any warning fails), vet, the M0 gate

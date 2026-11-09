@@ -51,4 +51,6 @@ _None yet._
 
 ## Next
 
-See [`roadmap.md`](roadmap.md).
+**0.3.x**: the consumable `dist/amuzesh.cyr` bundle (no gate). Then the first consumer
+(0.4.x, gated on a pull), the freeze candidate (0.5.x) and 1.0.0. Of the v1.0 criteria,
+only the consumer and the freeze remain. See [`roadmap.md`](roadmap.md).

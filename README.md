@@ -60,11 +60,13 @@ A consumer includes `lib/ganita.cyr`, `lib/tyche.cyr`, then `src/dist.cyr`, `src
 
 ## Roadmap
 
-M0 (k-means + prototype classifier) is the floor. Further classical mechanisms — logistic
-regression (IRLS), GLM / ridge / PCA (thin over ganita), gradient-boosted trees (the *auditable*
-phylax/aegis form), Kalman / HMM filters, naive Bayes — are mapped in the AGNOS planning doc
-`classical-shallow-ml.md` and land per the emergent-extraction discipline (a mechanism becomes a
-shipped lib when a second consumer needs it).
+[`docs/development/roadmap.md`](docs/development/roadmap.md): **0.3.x** a consumable
+`dist/amuzesh.cyr` bundle, **0.4.x** the first downstream consumer green, **0.5.x** the
+API review and the pre-freeze audit, **1.0.0** the freeze. Further classical mechanisms —
+linear / ridge, PCA, logistic regression (IRLS), naive Bayes, Kalman / HMM filters,
+gradient-boosted trees (the *auditable* phylax/aegis form) — are in its v1 backlog, mapped
+in the AGNOS planning doc `classical-shallow-ml.md`. Each lands when a consumer pulls it,
+and becomes a shipped lib only when a second consumer needs it.
 
 ## License
 
