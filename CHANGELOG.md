@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
+Moves amuzesh onto the cyrius 6.7 series. No source or behavior change.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). No source change. 6.7.0–6.7.9
+  reserve `trait`, `const`, `true`, `false`, `do` and `dyn`, make `!` an operator of its own,
+  and bind unary `-` / `~` tighter on a constant. amuzesh's source uses none of these; the
+  only match is `-D` inside a string literal. `cyrius lib sync --full` re-vendored the
+  6.7.9 snapshot: `lib/` byte-matches it, the same 113 files as 6.6.20, 67 with new content.
+  Nothing was added or removed. Lint is clean on every `src/` file.
+- **`[deps.ganita]` `1.2.14` → `1.2.15`** — the version the 6.7.9 snapshot bundles; the tag's
+  `dist/ganita.cyr` is byte-identical to the toolchain's `lib/ganita.cyr`. A toolchain-only
+  release: every function, signature and result is 1.2.14's.
+- **`[deps.tyche]` `1.1.1` → `1.2.0`** — the tyche release built against 6.7.9. No library or
+  API change; tyche's golden dump of the stream is byte-identical to 1.1.1's.
+- **`cyrius.lock` regenerated** — 114 files, the two commit pins, and the `cyrius 6.7.9`
+  trailer. `cyrius deps --verify` is clean. As at 6.6.20, `cyrius deps` kept the superseded
+  `ganita 1.2.14` / `tyche 1.1.1` pins next to the new ones, so the lock was rebuilt from
+  scratch.
+- Suite **23/23** and the M0 demo gate pass. The demo output is byte-identical to the 6.6.20
+  and 6.6.2 runs. The bench and fuzz stubs pass. The binary stays at 286,560 B. Nothing here
+  uses `cyrius tests`, which 6.7.6 deprecated and 6.7.12 removes; CI already runs bare
+  `cyrius test`.
+
 ## [0.1.3] - 2026-11-09
 
 ### Changed
