@@ -3,184 +3,315 @@
 # centroid update, inertia, the D²-weighted seed walk, and the fit driver. Matrix
 # storage and the PRNG are substrate (ganita / tyche), not reimplemented here.
 #
-# A fitted model is a flat 8-slot record (alloc'd i64 array):
-#   [0]=k  [1]=d  [2]=n  [3]=centroids(K×D mat)  [4]=labels(i64[n])
-#   [5]=inertia(f64)  [6]=iters  [7]=history(i64[max_iter], per-iter inertia f64)
+# A fitted model is a flat 9-slot record (alloc'd i64 array):
+#   [0]=k  [1]=d  [2]=n  [3]=centroids (k×d ganita matrix)  [4]=labels (i64[n])
+#   [5]=inertia (f64)  [6]=iters  [7]=history (i64[max_iter]; the first `iters` hold the
+#   inertia after each assignment)  [8]=converged (1 = labels reached a fixed point)
+# Read it through the amz_model_* accessors.
 #
-# Include AFTER lib/ganita.cyr, lib/tyche.cyr, src/dist.cyr.
+# Every public function validates its arguments and fails in the vocabulary of
+# src/check.cyr (ADR 0002); the _amz_* kernels below assume a validated call.
+#
+# Include AFTER lib/ganita.cyr, lib/tyche.cyr, src/dist.cyr, src/check.cyr.
+
+var _AMZ_MODEL_SLOTS = 9;
 
 # ---- k-means++ seeding ------------------------------------------------------
-# Choose k initial centers from X (n×d) D²-weighted, writing the chosen data rows
-# into out_cents (K×D). RNG must be seeded by the caller. tyche has no weighted
-# sampler, so the categorical draw is an inverse-CDF walk over rng_uniform().
-fn amz_kmeans_pp_seed(X, n, d, k, out_cents): i64 {
-    var dist = alloc(n * 8);                              # running nearest-center sq-dist
-    var first = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % n;     # first center: uniform data point
-    amz_copy_row(X, first, out_cents, 0, d);
+# Kernel: choose k centers from X (n×d), D²-weighted, writing the chosen data rows into
+# cents (k×d). `dist` is n words of scratch (the running nearest-center squared
+# distance). The RNG must be seeded by the caller. tyche has no weighted sampler, so the
+# categorical draw is an inverse-CDF walk over rng_uniform(), stopped at the first index
+# whose running sum passes the draw. The fold uses partial-distance search against each
+# point's current minimum (see _amz_sqdist_lt); every choice is bit-identical to 0.2.1's.
+# Precondition: validated as amz_kmeans_pp_seed does; X finite.
+fn _amz_pp_seed(X, n, d, k, cents, dist): i64 {
+    var stride = d * 8;
+    var x0 = _amz_row(X, 0);
+    var first = (rng_u64() & 0x7FFFFFFFFFFFFFFF) % n;   # first center: a uniform data point
+    amz_copy_row(X, first, cents, 0, d);
+    var pc = _amz_row(cents, 0);
+    var total = f64_from(0);
+    var px = x0;
     var i = 0;
-    while (i < n) { store64(dist + i * 8, amz_sqdist(X, i, out_cents, 0, d)); i = i + 1; }
+    while (i < n) {
+        var d0 = _amz_sqdist_ptr(px, pc, d);
+        store64(dist + i * 8, d0);
+        total = f64_add(total, d0);
+        px = px + stride;
+        i = i + 1;
+    }
     var c = 1;
     while (c < k) {
-        var total = f64_from(0);
-        i = 0;
-        while (i < n) { total = f64_add(total, load64(dist + i * 8)); i = i + 1; }
-        var u = f64_mul(rng_uniform(), total);            # draw in [0, total)
-        var cum = f64_from(0); var pick = 0 - 1;
+        var u = f64_mul(rng_uniform(), total);   # in [0, total): rng_uniform() < 1 rounds below total
+        var cum = f64_from(0);
+        var pick = 0 - 1;
         i = 0;
         while (i < n) {
             cum = f64_add(cum, load64(dist + i * 8));
-            if ((pick < 0) && (f64_gt(cum, u) == 1)) { pick = i; }
+            if (f64_gt(cum, u) == 1) { pick = i; break; }
             i = i + 1;
         }
-        if (pick < 0) { pick = n - 1; }                   # degenerate (total==0) fallback
-        amz_copy_row(X, pick, out_cents, c, d);
-        i = 0;                                            # fold the new center into the running min
-        while (i < n) {
-            var dn = amz_sqdist(X, i, out_cents, c, d);
-            if (f64_lt(dn, load64(dist + i * 8)) == 1) { store64(dist + i * 8, dn); }
-            i = i + 1;
+        if (pick < 0) { pick = n - 1; }   # total == 0: every point already sits on a center
+        amz_copy_row(X, pick, cents, c, d);
+        if (c + 1 < k) {
+            # Fold the new center into the running minimum and re-total, in the same
+            # index order the walk reads, for the next draw. The last center needs no fold.
+            pc = _amz_row(cents, c);
+            total = f64_from(0);
+            px = x0;
+            i = 0;
+            while (i < n) {
+                var dmin = load64(dist + i * 8);
+                var dn = _amz_sqdist_lt(px, pc, d, dmin);
+                if (f64_lt(dn, dmin) == 1) { dmin = dn; store64(dist + i * 8, dn); }
+                total = f64_add(total, dmin);
+                px = px + stride;
+                i = i + 1;
+            }
         }
         c = c + 1;
     }
     return 0;
 }
 
+# Choose k initial centers from X (n×d) D²-weighted (k-means++), writing the chosen data
+# rows into out_cents (at least k×d). The RNG must be seeded by the caller.
+# RETURNS 0, AMZ_ERR_ARG (X / out_cents shape, k outside [1, n], a non-finite entry
+# of X), or AMZ_ERR_ALLOC.
+fn amz_kmeans_pp_seed(X, n, d, k, out_cents): i64 {
+    if (_amz_mat_ok(X, n, d) == 0) { return AMZ_ERR_ARG; }
+    if ((k < 1) || (k > n)) { return AMZ_ERR_ARG; }
+    if (_amz_mat_ok(out_cents, k, d) == 0) { return AMZ_ERR_ARG; }
+    if (_amz_mat_finite(X, n, d) == 0) { return AMZ_ERR_ARG; }
+    var dist = _amz_alloc_words(n);
+    if (dist == 0) { return AMZ_ERR_ALLOC; }
+    return _amz_pp_seed(X, n, d, k, out_cents, dist);
+}
+
 # ---- Lloyd iteration --------------------------------------------------------
-# Assign each point to its nearest centroid; fill out_labels[0..n); RETURN inertia
-# (the sum of the chosen min squared distances) as an f64 bit pattern.
-fn amz_kmeans_assign(X, n, d, cents, k, out_labels): i64 {
+# Kernel: label each of the n rows of X with its nearest centroid (ties go to the lowest
+# index) and RETURN the inertia, the sum of those minimum squared distances. Candidates
+# after the first are measured by partial-distance search against the best so far, which
+# leaves every label and the inertia bit-identical to the full sums.
+# Precondition: validated as amz_kmeans_assign does.
+fn _amz_assign(X, n, d, cents, k, out_labels): i64 {
+    var stride = d * 8;
+    var c0 = _amz_row(cents, 0);
     var inertia = f64_from(0);
+    var px = _amz_row(X, 0);
     var i = 0;
     while (i < n) {
-        var best = 0; var bestd = amz_sqdist(X, i, cents, 0, d);
+        var best = 0;
+        var bestd = _amz_sqdist_ptr(px, c0, d);
+        var pc = c0 + stride;
         var j = 1;
         while (j < k) {
-            var dj = amz_sqdist(X, i, cents, j, d);
+            var dj = _amz_sqdist_lt(px, pc, d, bestd);
             if (f64_lt(dj, bestd) == 1) { bestd = dj; best = j; }
+            pc = pc + stride;
             j = j + 1;
         }
         store64(out_labels + i * 8, best);
         inertia = f64_add(inertia, bestd);
+        px = px + stride;
         i = i + 1;
     }
     return inertia;
 }
 
-# Recompute each centroid as the mean of its assigned points (the SSE minimizer for a
-# fixed assignment). An EMPTY cluster keeps its previous centroid (no divide-by-zero /
-# NaN). RETURN the empty-cluster count.
-fn amz_kmeans_update(X, n, d, labels, k, out_cents): i64 {
-    var sums = ganita_mat_new(k, d);
-    var counts = alloc(k * 8);
+# Assign each of the n rows of X (n×d) to its nearest of the k centroid rows of cents
+# (k×d), filling out_labels[0..n). RETURNS the inertia (the sum of the chosen squared
+# distances) as an f64, or NaN for a bad shape, a null out_labels, k < 1, or a
+# non-finite entry in X or cents.
+fn amz_kmeans_assign(X, n, d, cents, k, out_labels): i64 {
+    if (_amz_mat_ok(X, n, d) == 0) { return AMZ_NAN; }
+    if (_amz_mat_ok(cents, k, d) == 0) { return AMZ_NAN; }
+    if (out_labels == 0) { return AMZ_NAN; }
+    if (_amz_mat_finite(X, n, d) == 0) { return AMZ_NAN; }
+    if (_amz_mat_finite(cents, k, d) == 0) { return AMZ_NAN; }
+    return _amz_assign(X, n, d, cents, k, out_labels);
+}
+
+# Kernel: recompute each centroid as the mean of its assigned rows (the SSE minimizer for
+# a fixed assignment), by the running mean of _amz_label_means. An EMPTY cluster keeps its
+# previous centroid. `means` (k·d words) and `counts` (k words) are scratch. RETURNS the
+# number of empty clusters. Precondition: validated as amz_kmeans_update does.
+fn _amz_update(X, n, d, labels, k, cents, means, counts): i64 {
+    _amz_label_means(X, n, d, labels, k, means, counts);
+    var stride = d * 8;
+    var empty = 0;
     var j = 0;
-    while (j < k) { store64(counts + j * 8, 0); j = j + 1; }
-    var i = 0; var c = 0; var lab = 0;
-    i = 0;
-    while (i < n) {
-        lab = load64(labels + i * 8);
-        c = 0;
-        while (c < d) {
-            ganita_mat_set(sums, lab, c, f64_add(ganita_mat_get(sums, lab, c), ganita_mat_get(X, i, c)));
-            c = c + 1;
-        }
-        store64(counts + lab * 8, load64(counts + lab * 8) + 1);
-        i = i + 1;
-    }
-    var empty = 0; var cnt = 0; var inv = 0;
-    j = 0;
     while (j < k) {
-        cnt = load64(counts + j * 8);
-        if (cnt == 0) { empty = empty + 1; }
+        if (load64(counts + j * 8) == 0) { empty = empty + 1; }
         else {
-            inv = f64_div(f64_from(1), f64_from(cnt));
-            c = 0;
-            while (c < d) { ganita_mat_set(out_cents, j, c, f64_mul(ganita_mat_get(sums, j, c), inv)); c = c + 1; }
+            var pm = means + j * stride;
+            var pc = _amz_row(cents, j);
+            var c = 0;
+            while (c < d) { store64(pc + c * 8, load64(pm + c * 8)); c = c + 1; }
         }
         j = j + 1;
     }
     return empty;
 }
 
+# Recompute each of the k centroid rows of out_cents as the mean of the rows of X whose
+# label is that cluster. An EMPTY cluster keeps its previous centroid (no divide by
+# zero, no NaN). RETURNS the empty-cluster count, AMZ_ERR_ARG (a bad shape, k < 1, or a
+# label outside [0, k)), or AMZ_ERR_ALLOC. A carrier: non-finite input propagates.
+fn amz_kmeans_update(X, n, d, labels, k, out_cents): i64 {
+    if (_amz_mat_ok(X, n, d) == 0) { return AMZ_ERR_ARG; }
+    if (_amz_mat_ok(out_cents, k, d) == 0) { return AMZ_ERR_ARG; }
+    if (_amz_labels_ok(labels, n, k) == 0) { return AMZ_ERR_ARG; }
+    var means = _amz_alloc_words(k * d);
+    var counts = _amz_alloc_words(k);
+    if ((means == 0) || (counts == 0)) { return AMZ_ERR_ALLOC; }
+    return _amz_update(X, n, d, labels, k, out_cents, means, counts);
+}
+
 # ---- fit driver -------------------------------------------------------------
-# Full Lloyd loop: k-means++ seed, then assign↔update until the label vector reaches a
-# fixed point or max_iter passes. Inertia is recorded AFTER each assign (against the
-# centroids that produced those labels), so the history is directly checkable for the
-# Lloyd non-increasing invariant. RETURNS a model record (see the header).
+# Full Lloyd loop: k-means++ seed, then assign <-> update until the label vector reaches
+# a fixed point or max_iter assignments have run. Inertia is recorded AFTER each assign
+# (against the centroids that produced those labels), so the history is directly
+# checkable for the Lloyd non-increasing invariant.
+#
+# The returned model is always self-consistent: its labels are the nearest-centroid
+# labels of its centroids, and its inertia is theirs. When the budget runs out first,
+# the last update is skipped rather than leaving labels that describe older centroids;
+# amz_model_converged() tells the two endings apart.
+#
+# Everything the fit needs is allocated once, before the loop, so a fit's memory does not
+# grow with its iteration count (the heap never frees; see lib/alloc.cyr).
+#
+# RETURNS a model record (see the header), or 0 for a bad shape, k outside [1, n],
+# max_iter outside [1, AMZ_KMEANS_MAX_ITER], a non-finite entry of X, or an allocation
+# failure. Seeds tyche's global stream with `seed`.
 fn amz_kmeans_fit(X, n, d, k, max_iter, seed): i64 {
-    rng_seed(seed);
+    if (_amz_mat_ok(X, n, d) == 0) { return 0; }
+    if ((k < 1) || (k > n)) { return 0; }
+    if ((max_iter < 1) || (max_iter > AMZ_KMEANS_MAX_ITER)) { return 0; }
+    if (_amz_mat_finite(X, n, d) == 0) { return 0; }
     var cents = ganita_mat_new(k, d);
-    amz_kmeans_pp_seed(X, n, d, k, cents);
-    var labels = alloc(n * 8);
-    var prev = alloc(n * 8);
-    var history = alloc(max_iter * 8);
-    var i = 0;
-    while (i < n) { store64(prev + i * 8, 0 - 1); i = i + 1; }   # force the first iteration
+    var cur = _amz_alloc_words(n);
+    var prev = _amz_alloc_words(n);       # also the seeding scratch: seeding ends before it is read
+    var history = _amz_alloc_words(max_iter);
+    var means = _amz_alloc_words(k * d);
+    var counts = _amz_alloc_words(k);
+    var model = _amz_alloc_words(_AMZ_MODEL_SLOTS);
+    if ((cents == 0) || (cur == 0) || (prev == 0)) { return 0; }
+    if ((history == 0) || (means == 0) || (counts == 0) || (model == 0)) { return 0; }
+
+    rng_seed(seed);
+    _amz_pp_seed(X, n, d, k, cents, prev);
+    _amz_fill_words(prev, n, 0 - 1);      # matches no label: forces the first update
     var inertia = f64_from(0);
     var iters = 0;
     var converged = 0;
-    while ((iters < max_iter) && (converged == 0)) {
-        inertia = amz_kmeans_assign(X, n, d, cents, k, labels);
+    while (iters < max_iter) {
+        inertia = _amz_assign(X, n, d, cents, k, cur);
         store64(history + iters * 8, inertia);
-        var same = 1;
-        i = 0;
-        while (i < n) {
-            if (load64(labels + i * 8) != load64(prev + i * 8)) { same = 0; }
-            i = i + 1;
-        }
-        if (same == 1) { converged = 1; }
-        else {
-            amz_kmeans_update(X, n, d, labels, k, cents);
-            i = 0;
-            while (i < n) { store64(prev + i * 8, load64(labels + i * 8)); i = i + 1; }
-        }
         iters = iters + 1;
+        if (_amz_words_eq(cur, prev, n) == 1) { converged = 1; break; }
+        if (iters == max_iter) { break; }   # out of budget: keep the centroids that produced `cur`
+        _amz_update(X, n, d, cur, k, cents, means, counts);
+        var swap = prev;
+        prev = cur;
+        cur = swap;
     }
-    var model = alloc(8 * 8);
     store64(model + 0 * 8, k);
     store64(model + 1 * 8, d);
     store64(model + 2 * 8, n);
     store64(model + 3 * 8, cents);
-    store64(model + 4 * 8, labels);
+    store64(model + 4 * 8, cur);
     store64(model + 5 * 8, inertia);
     store64(model + 6 * 8, iters);
     store64(model + 7 * 8, history);
+    store64(model + 8 * 8, converged);
     return model;
 }
 
 # ---- model accessors --------------------------------------------------------
-fn amz_model_k(m): i64         { return load64(m + 0 * 8); }
-fn amz_model_d(m): i64         { return load64(m + 1 * 8); }
-fn amz_model_n(m): i64         { return load64(m + 2 * 8); }
-fn amz_model_centroids(m): i64 { return load64(m + 3 * 8); }
-fn amz_model_labels(m): i64    { return load64(m + 4 * 8); }
-fn amz_model_inertia(m): i64   { return load64(m + 5 * 8); }   # f64 bits
-fn amz_model_iters(m): i64     { return load64(m + 6 * 8); }
-fn amz_model_history(m): i64   { return load64(m + 7 * 8); }
+# Each accessor is null-safe, so a refused fit (model 0) reads as a failure instead of
+# a crash: a pointer field reads 0, a count reads AMZ_ERR_ARG, the inertia reads NaN.
+
+# Number of clusters k.
+fn amz_model_k(m): i64 { if (m == 0) { return AMZ_ERR_ARG; } return load64(m + 0 * 8); }
+# Dimension d.
+fn amz_model_d(m): i64 { if (m == 0) { return AMZ_ERR_ARG; } return load64(m + 1 * 8); }
+# Number of fitted rows n.
+fn amz_model_n(m): i64 { if (m == 0) { return AMZ_ERR_ARG; } return load64(m + 2 * 8); }
+# The k×d centroid matrix.
+fn amz_model_centroids(m): i64 { if (m == 0) { return 0; } return load64(m + 3 * 8); }
+# The n final labels (i64 array).
+fn amz_model_labels(m): i64 { if (m == 0) { return 0; } return load64(m + 4 * 8); }
+# Inertia of the final labels against the final centroids (f64).
+fn amz_model_inertia(m): i64 { if (m == 0) { return AMZ_NAN; } return load64(m + 5 * 8); }
+# Number of assignments run (1..max_iter).
+fn amz_model_iters(m): i64 { if (m == 0) { return AMZ_ERR_ARG; } return load64(m + 6 * 8); }
+# Per-assignment inertia history (f64 array; the first amz_model_iters() entries are set).
+fn amz_model_history(m): i64 { if (m == 0) { return 0; } return load64(m + 7 * 8); }
+# 1 if the labels reached a fixed point, 0 if max_iter ran out first.
+fn amz_model_converged(m): i64 { if (m == 0) { return AMZ_ERR_ARG; } return load64(m + 8 * 8); }
+
+# 1 if an inertia history of `iters` f64 entries never rises by more than a relative
+# 1e-9 between consecutive entries (Lloyd's invariant, with room for rounding), 0 if it
+# does, AMZ_ERR_ARG for a null history or iters < 1. The slack is relative, so the verdict
+# does not depend on the scale of the data.
+fn amz_inertia_monotone(history, iters): i64 {
+    if ((history == 0) || (iters < 1)) { return AMZ_ERR_ARG; }
+    var slack = f64_add(f64_from(1), f64_div(f64_from(1), f64_from(1000000000)));
+    var t = 1;
+    while (t < iters) {
+        var allowed = f64_mul(load64(history + (t - 1) * 8), slack);
+        if (f64_gt(load64(history + t * 8), allowed) == 1) { return 0; }
+        t = t + 1;
+    }
+    return 1;
+}
 
 # ---- coverage metric --------------------------------------------------------
 # Cluster purity = (1/n) Σ_clusters max_class (#points of that true class in the
 # cluster) — permutation-invariant, so it does not depend on the arbitrary cluster
-# numbering. Returns an f64 fraction in [0,1].
+# numbering. labels lie in [0, k), y in [0, ncls).
+#
+# One pass checks both label ranges while threading each cluster's members into a list
+# (nothing but purity's own scratch is written before the check finishes). Each list is
+# then counted once against a histogram stamped with the cluster that last wrote each
+# entry, so a count left by an earlier cluster reads as 0 without a clearing pass:
+# O(n + k + ncls) time and memory, never 0.2.1's O(k·n).
+# RETURNS an f64 fraction in [0, 1], or NaN for n < 1, k < 1, ncls < 1, a null array, a
+# label outside its range, or an allocation failure.
 fn amz_purity(labels, y, n, k, ncls): i64 {
-    var hist = alloc(ncls * 8);
+    if ((n < 1) || (k < 1) || (ncls < 1)) { return AMZ_NAN; }
+    if ((labels == 0) || (y == 0)) { return AMZ_NAN; }
+    var head = _amz_alloc_words(k);
+    var nxt = _amz_alloc_words(n);
+    var hist = _amz_alloc_words(ncls);
+    var stamp = _amz_alloc_words(ncls);
+    if ((head == 0) || (nxt == 0) || (hist == 0) || (stamp == 0)) { return AMZ_NAN; }
+    _amz_fill_words(head, k, 0 - 1);
+    _amz_fill_words(stamp, ncls, 0 - 1);
+    var i = 0;
+    while (i < n) {
+        var lab = load64(labels + i * 8);
+        var cls = load64(y + i * 8);
+        if ((lab < 0) || (lab >= k) || (cls < 0) || (cls >= ncls)) { return AMZ_NAN; }
+        store64(nxt + i * 8, load64(head + lab * 8));
+        store64(head + lab * 8, i);
+        i = i + 1;
+    }
     var total_major = 0;
     var j = 0;
     while (j < k) {
-        var cc = 0;
-        while (cc < ncls) { store64(hist + cc * 8, 0); cc = cc + 1; }
-        var i = 0;
-        while (i < n) {
-            if (load64(labels + i * 8) == j) {
-                var ty = load64(y + i * 8);
-                store64(hist + ty * 8, load64(hist + ty * 8) + 1);
-            }
-            i = i + 1;
-        }
         var mx = 0;
-        cc = 0;
-        while (cc < ncls) {
-            if (load64(hist + cc * 8) > mx) { mx = load64(hist + cc * 8); }
-            cc = cc + 1;
+        var p = load64(head + j * 8);
+        while (p >= 0) {
+            var t = load64(y + p * 8);
+            var h = 1;
+            if (load64(stamp + t * 8) == j) { h = load64(hist + t * 8) + 1; }
+            else { store64(stamp + t * 8, j); }
+            store64(hist + t * 8, h);
+            if (h > mx) { mx = h; }
+            p = load64(nxt + p * 8);
         }
         total_major = total_major + mx;
         j = j + 1;

@@ -11,12 +11,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token. Nothing here writes to the repository, and when release.yml calls
+# this workflow the called side can only lower the caller's permissions, so the CI gate
+# never holds the release job's contents: write.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+      # Pinned to a full commit SHA (a tag can be moved). persist-credentials false keeps
+      # the token out of .git/config, where the curl | sh installer below could read it.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — the release-integrity hardening item)
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
         # The cyrius.cyml [package].cyrius pin is the single source of
@@ -36,10 +46,46 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
+      - name: Version consistency
+        # VERSION is the single source of truth; cyrius.cyml derives it via
+        # version = "${file:VERSION}", and the release needs a CHANGELOG section.
+        run: |
+          V=$(tr -d '[:space:]' < VERSION)
+          grep -q '^version = "${file:VERSION}"' cyrius.cyml || { echo "cyrius.cyml does not derive VERSION"; exit 1; }
+          grep -q "^## \[$V\]" CHANGELOG.md || { echo "no CHANGELOG section for $V"; exit 1; }
+          echo "version $V consistent"
+
+      - name: Format check
+        run: |
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+            cyrius fmt "$f" --check
+          done
+
+      - name: Lint
+        # Hard gate: any warning fails, in src/ and tests/.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            if echo "$out" | grep -qE '^[[:space:]]*(warn|error) '; then
+              echo "lint: warnings in $f"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Vet
+        # Every file the demo includes resolves, and none is untrusted. Exits 1 on a finding.
+        run: cyrius vet src/main.cyr
+
       - name: Build
         run: |
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
+
+      - name: Run the M0 gate
+        # The demo exits 0 only if inertia is monotone and purity and accuracy clear 95%.
+        run: ./build/${{ github.event.repository.name }}
 
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
@@ -48,3 +94,34 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Fuzz
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build tests/amuzesh.fcyr build/amuzesh-fuzz
+          timeout 60 ./build/amuzesh-fuzz || { echo "FUZZ FAILED"; exit 1; }
+
+      - name: Tests, fuzz and M0 gate on aarch64 (qemu-user)
+        # The unit suite pins exact bit patterns (blobs, seeds, assignment, fit), so running
+        # it on a second architecture checks that a fit is the same bits on both. Fails
+        # rather than skips when the cross-compiler or qemu is missing: a skipped gate would
+        # report green over exactly the property it exists to check.
+        run: |
+          [ -x "$HOME/.cyrius/bin/cycc_aarch64" ] || {
+            echo "::error::cycc_aarch64 not shipped with this Cyrius; cannot test aarch64"; exit 1; }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user || sudo apt-get install -y -qq qemu-user-static
+          QEMU="$(command -v qemu-aarch64 || command -v qemu-aarch64-static)" || {
+            echo "::error::no qemu-aarch64 binary after install"; exit 1; }
+          mkdir -p build
+          cyrius build --aarch64 tests/amuzesh.tcyr build/amuzesh-tcyr-a64
+          "$QEMU" build/amuzesh-tcyr-a64
+          CYRIUS_DCE=1 cyrius build --aarch64 tests/amuzesh.fcyr build/amuzesh-fuzz-a64
+          timeout 120 "$QEMU" build/amuzesh-fuzz-a64
+          cyrius build --aarch64 src/main.cyr build/amuzesh-a64
+          "$QEMU" build/amuzesh-a64
+
+      - name: Benchmarks
+        # Informational: CI runners are too noisy to gate on time. Baselines are recorded
+        # locally with scripts/bench-history.sh (bench-history.csv, docs/benchmarks.md).
+        run: CYRIUS_DCE=1 cyrius bench tests/amuzesh.bcyr

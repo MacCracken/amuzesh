@@ -1,34 +1,45 @@
-# amuzesh — M0 unit suite. Classical/shallow ML has NO finite-difference gradient gate
+# amuzesh — unit suite. Classical/shallow ML has NO finite-difference gradient gate
 # (k-means / prototype are not gradient methods); correctness is proven by convergence
 # (monotone inertia + fixed-point labels), coverage (cluster purity), exact analytic
-# means, and held-out accuracy on separable sets. Stdlib auto-included via cyrius.cyml.
+# means, held-out accuracy on separable sets, known-answer bit patterns, and the
+# refusal contract of src/check.cyr (ADR 0002). Stdlib auto-included via cyrius.cyml.
+#
+# Known-answer bit patterns were recorded from 0.2.1 and re-derived by the 0.2.2 kernels:
+# blobs, k-means++ seeds, assignment, the fit's labels and its inertia are bit-identical
+# to 0.2.1. Centroids and prototypes use the running (Welford) mean introduced at 0.2.2,
+# and move by 1-2 ulp: on this fixture they are within 1.43 ulp of the exact mean, where
+# 0.2.1's sum·(1/n) was within 2.03. A change that moves any known answer is a stream change.
 
 include "lib/ganita.cyr"
 include "lib/tyche.cyr"
 include "src/dist.cyr"
+include "src/check.cyr"
 include "src/kmeans.cyr"
 include "src/proto.cyr"
 include "src/data.cyr"
 
-fn EPS6(): i64 { return f64_div(f64_from(1), f64_from(1000000)); }    # 1e-6
+# 1e-6 as an f64.
+fn EPS6(): i64 { return f64_div(f64_from(1), f64_from(1000000)); }
+# |a - b| < 1e-6 for two f64 values?
 fn feq(a, b): i64 { if (f64_lt(f64_abs(f64_sub(a, b)), EPS6()) == 1) { return 1; } return 0; }
+# 1 if v is the f64 failure value (any NaN).
+fn is_nan(v): i64 { return _amz_is_nan(v); }
 
-# all entries of two rows×cols ganita matrices equal?
+# all entries of two rows×cols ganita matrices equal (within 1e-6)?
 fn amz_mat_eq(A, B, rows, cols): i64 {
     var r = 0;
     while (r < rows) {
         var c = 0;
-        while (c < cols) { if (feq(ganita_mat_get(A, r, c), ganita_mat_get(B, r, c)) == 0) { return 0; } c = c + 1; }
+        while (c < cols) {
+            if (feq(ganita_mat_get(A, r, c), ganita_mat_get(B, r, c)) == 0) { return 0; }
+            c = c + 1;
+        }
         r = r + 1;
     }
     return 1;
 }
 # two label vectors of length n equal?
-fn labels_eq(a, b, n): i64 {
-    var i = 0;
-    while (i < n) { if (load64(a + i * 8) != load64(b + i * 8)) { return 0; } i = i + 1; }
-    return 1;
-}
+fn labels_eq(a, b, n): i64 { return _amz_words_eq(a, b, n); }
 # all pairwise sq-distances among k centroid rows exceed minsq?
 fn seeds_spread(C, k, d, minsq): i64 {
     var i = 0;
@@ -39,95 +50,383 @@ fn seeds_spread(C, k, d, minsq): i64 {
     }
     return 1;
 }
-# inertia history non-increasing within an absolute slack of 1.0 (f64 rounding)?
-fn hist_monotone(hist, iters): i64 {
-    var t = 1;
-    while (t < iters) {
-        if (f64_gt(load64(hist + t * 8), f64_add(load64(hist + (t - 1) * 8), f64_from(1))) == 1) { return 0; }
-        t = t + 1;
+# Set row r of a 2-column matrix to the integers (a, b).
+fn set2(m, r, a, b): i64 {
+    ganita_mat_set(m, r, 0, f64_from(a));
+    ganita_mat_set(m, r, 1, f64_from(b));
+    return 0;
+}
+# A 4-entry i64 label array (a, b, c, e).
+fn lab4(a, b, c, e): i64 {
+    var p = alloc(4 * 8);
+    store64(p, a); store64(p + 8, b); store64(p + 16, c); store64(p + 24, e);
+    return p;
+}
+# A 3×1 matrix holding the integers 1, 2, 2 (sum 5, so the mean is 5/3).
+fn one_two_two(): i64 {
+    var m = ganita_mat_new(3, 1);
+    ganita_mat_set(m, 0, 0, f64_from(1));
+    ganita_mat_set(m, 1, 0, f64_from(2));
+    ganita_mat_set(m, 2, 0, f64_from(2));
+    return m;
+}
+# A 7×2 matrix whose rows are all (0.1, 0.3): seven copies, summed and divided by 7, miss
+# 0.1 by an ulp, so this exposes a mean that is not exact on identical rows.
+fn sevens(): i64 {
+    var m = ganita_mat_new(7, 2);
+    var r = 0;
+    while (r < 7) {
+        ganita_mat_set(m, r, 0, f64_div(f64_from(1), f64_from(10)));
+        ganita_mat_set(m, r, 1, f64_div(f64_from(3), f64_from(10)));
+        r = r + 1;
     }
-    return 1;
+    return m;
+}
+# Order-dependent hash of n labels (pins a whole labeling in one i64).
+fn label_hash(L, n): i64 {
+    var h = 0;
+    var i = 0;
+    while (i < n) { h = h * 31 + load64(L + i * 8) + 1; i = i + 1; }
+    return h;
+}
+# The 0.2.1 purity algorithm, kept as an independent O(k·n) oracle for the new one.
+fn purity_oracle(labels, y, n, k, ncls): i64 {
+    var hist = alloc(ncls * 8);
+    var total = 0;
+    var j = 0;
+    while (j < k) {
+        _amz_fill_words(hist, ncls, 0);
+        var i = 0;
+        while (i < n) {
+            if (load64(labels + i * 8) == j) {
+                var slot = hist + load64(y + i * 8) * 8;
+                store64(slot, load64(slot) + 1);
+            }
+            i = i + 1;
+        }
+        var mx = 0;
+        var c = 0;
+        while (c < ncls) { if (load64(hist + c * 8) > mx) { mx = load64(hist + c * 8); } c = c + 1; }
+        total = total + mx;
+        j = j + 1;
+    }
+    return f64_div(f64_from(total), f64_from(n));
 }
 
+# Run every group; RETURNS the failed-assertion count (0 = all pass) as the exit code.
 fn main() {
     alloc_init();
+    var NAN = AMZ_NAN;
+    var INF = 0x7FF0000000000000;
     # shared separable-blobs fixture (reused by the seeding / fit / classifier groups)
     var n_per = 30; var d = 2; var k = 3; var n = k * n_per;
     var X = ganita_mat_new(n, d); var y = alloc(n * 8);
-    amz_make_blobs(n_per, d, k, 7, X, y);
+    var made = amz_make_blobs(n_per, d, k, 7, X, y);
+
+    test_group("row access (ADR 0003)");
+    var L = ganita_mat_new(3, 5);
+    var r = 0;
+    while (r < 3) { var c = 0; while (c < 5) { ganita_mat_set(L, r, c, f64_from(r * 10 + c)); c = c + 1; } r = r + 1; }
+    var same = 1;
+    r = 0;
+    while (r < 3) {
+        var c2 = 0;
+        while (c2 < 5) {
+            if (load64(_amz_row(L, r) + c2 * 8) != ganita_mat_get(L, r, c2)) { same = 0; }
+            c2 = c2 + 1;
+        }
+        r = r + 1;
+    }
+    assert(same == 1, "_amz_row(m, r) + 8c addresses ganita_mat_get(m, r, c) (layout pin)");
 
     test_group("dist / util");
     var M = ganita_mat_new(3, 2);
-    ganita_mat_set(M, 0, 0, f64_from(0)); ganita_mat_set(M, 0, 1, f64_from(0));   # (0,0)
-    ganita_mat_set(M, 1, 0, f64_from(3)); ganita_mat_set(M, 1, 1, f64_from(4));   # (3,4)
+    set2(M, 0, 0, 0); set2(M, 1, 3, 4);
     var R = ganita_mat_new(1, 2);
     amz_copy_row(M, 1, R, 0, 2);
     assert(feq(amz_sqdist(M, 0, M, 0, 2), f64_from(0)), "sqdist(p, p) == 0");
     assert(feq(amz_sqdist(M, 0, M, 1, 2), f64_from(25)), "sqdist((0,0),(3,4)) == 25");
     assert(feq(amz_sqdist(M, 0, M, 1, 2), amz_sqdist(M, 1, M, 0, 2)), "sqdist symmetric");
-    assert((feq(ganita_mat_get(R, 0, 0), f64_from(3)) == 1) && (feq(ganita_mat_get(R, 0, 1), f64_from(4)) == 1), "copy_row copies the row");
+    assert((feq(ganita_mat_get(R, 0, 0), f64_from(3)) == 1) && (feq(ganita_mat_get(R, 0, 1), f64_from(4)) == 1),
+      "copy_row copies the row");
+
+    test_group("validation primitives");
+    assert((_amz_is_finite(0) == 1) && (_amz_is_finite(0x8000000000000000) == 1), "±0 finite");
+    assert((_amz_is_finite(1) == 1) && (_amz_is_finite(0x7FEFFFFFFFFFFFFF) == 1), "subnormal + max finite");
+    assert((_amz_is_finite(INF) == 0) && (_amz_is_finite(0xFFF0000000000000) == 0), "±inf not finite");
+    assert((_amz_is_finite(NAN) == 0) && (_amz_is_nan(NAN) == 1) && (_amz_is_nan(0xFFF8000000000001) == 1),
+      "NaN (either sign) is NaN, not finite");
+    assert((_amz_is_nan(INF) == 0) && (_amz_is_nan(f64_from(7)) == 0), "inf and 7.0 are not NaN");
+    assert((_amz_mat_ok(0, 1, 1) == 0) && (_amz_mat_ok(M, 4, 2) == 0) && (_amz_mat_ok(M, 3, 3) == 0),
+      "mat_ok refuses null, too few rows, wrong cols");
+    assert((_amz_mat_ok(M, 0, 2) == 0) && (_amz_mat_ok(M, 3, 2) == 1) && (_amz_mat_ok(M, 2, 2) == 1),
+      "mat_ok refuses rows < 1, accepts rows <= rows(m)");
+    var lv = lab4(0, 1, 2, 1);
+    assert((_amz_labels_ok(lv, 4, 3) == 1) && (_amz_labels_ok(lv, 4, 2) == 0) && (_amz_labels_ok(0, 4, 3) == 0),
+      "labels_ok: in range / label == k / null");
+    assert(_amz_labels_ok(lab4(0, 0 - 1, 0, 0), 4, 3) == 0, "labels_ok refuses a negative label");
+    assert((_amz_alloc_words(0) == 0) && (_amz_alloc_words(ALLOC_MAX) == 0), "alloc_words refuses 0 and a wrap");
+
+    test_group("blobs fixture");
+    assert(made == n, "make_blobs returns k * n_per");
+    assert(ganita_mat_get(X, 0, 0) == 0x4022C2F6537FD667, "blob X[0][0] known answer");
+    assert(ganita_mat_get(X, 0, 1) == 0x4026E78C82961D45, "blob X[0][1] known answer");
+    assert(ganita_mat_get(X, 89, 1) == 0x403F10C3377ED03E, "blob X[89][1] known answer");
+    assert((load64(y) == 0) && (load64(y + 89 * 8) == 2), "blob labels run 0 .. k-1");
+    assert((amz_make_blobs(0, d, k, 7, X, y) == AMZ_ERR_ARG) && (amz_make_blobs(n_per, 0, k, 7, X, y) == AMZ_ERR_ARG),
+      "make_blobs refuses n_per or d below 1");
+    assert(amz_make_blobs(n_per, d, 4, 7, X, y) == AMZ_ERR_ARG, "make_blobs refuses an out_X too small");
+    assert(amz_make_blobs(n_per, 3, k, 7, X, y) == AMZ_ERR_ARG, "make_blobs refuses a column mismatch");
+    assert(amz_make_blobs(n_per, d, k, 7, X, 0) == AMZ_ERR_ARG, "make_blobs refuses a null out_y");
+    assert(amz_make_blobs(1099511627776, d, 1099511627776, 7, X, y) == AMZ_ERR_ARG,
+      "make_blobs refuses a k * n_per that would wrap");
 
     test_group("k-means++ seeding");
-    var C1 = ganita_mat_new(k, d); rng_seed(1337); amz_kmeans_pp_seed(X, n, d, k, C1);
+    var C1 = ganita_mat_new(k, d); rng_seed(1337);
+    var s1 = amz_kmeans_pp_seed(X, n, d, k, C1);
     var C2 = ganita_mat_new(k, d); rng_seed(1337); amz_kmeans_pp_seed(X, n, d, k, C2);
+    assert(s1 == 0, "pp_seed returns 0");
     assert(amz_mat_eq(C1, C2, k, d) == 1, "k-means++ reproducible under a fixed seed");
     assert(seeds_spread(C1, k, d, f64_from(25)) == 1, "k-means++ seeds land in distinct blobs (pairwise far)");
+    assert((ganita_mat_get(C1, 0, 0) == 0x4023BB20930FB580) && (ganita_mat_get(C1, 0, 1) == 0x402479D9F59AF79A),
+      "seed 0 known answer (bit-identical to 0.2.1)");
+    assert((ganita_mat_get(C1, 1, 0) == 0x4035978A235DA488) && (ganita_mat_get(C1, 1, 1) == 0x40375917BEDE0444),
+      "seed 1 known answer");
+    assert((ganita_mat_get(C1, 2, 0) == 0x403C9E23653C9EA4) && (ganita_mat_get(C1, 2, 1) == 0x403F8CD7D1E9C004),
+      "seed 2 known answer");
+    assert((amz_kmeans_pp_seed(X, n, d, 0, C1) == AMZ_ERR_ARG)
+      && (amz_kmeans_pp_seed(X, n, d, n + 1, C1) == AMZ_ERR_ARG),
+      "pp_seed refuses k outside [1, n]");
+    assert(amz_kmeans_pp_seed(X, n, d, 4, C1) == AMZ_ERR_ARG, "pp_seed refuses out_cents with fewer than k rows");
+    assert(amz_kmeans_pp_seed(X, n, 3, k, C1) == AMZ_ERR_ARG, "pp_seed refuses a column mismatch");
+    var XN = ganita_mat_new(4, 2); set2(XN, 0, 1, 1); set2(XN, 1, 2, 2); set2(XN, 2, 3, 3);
+    ganita_mat_set(XN, 3, 1, NAN);
+    assert(amz_kmeans_pp_seed(XN, 4, 2, 2, C1) == AMZ_ERR_ARG, "pp_seed refuses a NaN in X");
 
     test_group("Lloyd assign / update");
     var TX = ganita_mat_new(4, 2);
-    ganita_mat_set(TX, 0, 0, f64_from(0));  ganita_mat_set(TX, 0, 1, f64_from(0));
-    ganita_mat_set(TX, 1, 0, f64_from(0));  ganita_mat_set(TX, 1, 1, f64_from(2));
-    ganita_mat_set(TX, 2, 0, f64_from(10)); ganita_mat_set(TX, 2, 1, f64_from(10));
-    ganita_mat_set(TX, 3, 0, f64_from(10)); ganita_mat_set(TX, 3, 1, f64_from(12));
+    set2(TX, 0, 0, 0); set2(TX, 1, 0, 2); set2(TX, 2, 10, 10); set2(TX, 3, 10, 12);
     var TC = ganita_mat_new(2, 2);
-    ganita_mat_set(TC, 0, 0, f64_from(0));  ganita_mat_set(TC, 0, 1, f64_from(0));
-    ganita_mat_set(TC, 1, 0, f64_from(10)); ganita_mat_set(TC, 1, 1, f64_from(10));
+    set2(TC, 0, 0, 0); set2(TC, 1, 10, 10);
     var tlab = alloc(4 * 8);
     var tin = amz_kmeans_assign(TX, 4, 2, TC, 2, tlab);
-    assert((load64(tlab) == 0) && (load64(tlab + 8) == 0) && (load64(tlab + 16) == 1) && (load64(tlab + 24) == 1), "assign -> nearest-centroid labels");
+    assert(labels_eq(tlab, lab4(0, 0, 1, 1), 4) == 1, "assign -> nearest-centroid labels");
     assert(feq(tin, f64_from(8)), "assign inertia == summed min sq-dist (0+4+0+4)");
     var empty = amz_kmeans_update(TX, 4, 2, tlab, 2, TC);
-    assert((feq(ganita_mat_get(TC, 0, 0), f64_from(0)) == 1) && (feq(ganita_mat_get(TC, 0, 1), f64_from(1)) == 1), "update centroid0 == cluster mean (0,1)");
-    assert((feq(ganita_mat_get(TC, 1, 0), f64_from(10)) == 1) && (feq(ganita_mat_get(TC, 1, 1), f64_from(11)) == 1), "update centroid1 == cluster mean (10,11)");
+    assert((feq(ganita_mat_get(TC, 0, 0), f64_from(0)) == 1) && (feq(ganita_mat_get(TC, 0, 1), f64_from(1)) == 1),
+      "update centroid0 == cluster mean (0,1)");
+    assert((feq(ganita_mat_get(TC, 1, 0), f64_from(10)) == 1) && (feq(ganita_mat_get(TC, 1, 1), f64_from(11)) == 1),
+      "update centroid1 == cluster mean (10,11)");
     assert(empty == 0, "no empty clusters on the toy");
     var TC3 = ganita_mat_new(3, 2);
-    ganita_mat_set(TC3, 2, 0, f64_from(99)); ganita_mat_set(TC3, 2, 1, f64_from(99));   # sentinel prior centroid
-    var tl3 = alloc(4 * 8);
-    store64(tl3, 0); store64(tl3 + 8, 0); store64(tl3 + 16, 1); store64(tl3 + 24, 1);    # nobody in cluster 2
-    var empty3 = amz_kmeans_update(TX, 4, 2, tl3, 3, TC3);
-    assert((empty3 == 1) && (feq(ganita_mat_get(TC3, 2, 0), f64_from(99)) == 1), "empty cluster retains prior centroid + counted");
+    set2(TC3, 2, 99, 99);   # sentinel prior centroid
+    var empty3 = amz_kmeans_update(TX, 4, 2, lab4(0, 0, 1, 1), 3, TC3);
+    assert((empty3 == 1) && (feq(ganita_mat_get(TC3, 2, 0), f64_from(99)) == 1),
+      "empty cluster retains prior centroid + counted");
+    var lab_fx = alloc(n * 8);
+    assert(amz_kmeans_assign(X, n, d, C2, k, lab_fx) == 0x408083D569624F22,
+      "assign inertia known answer on the seeded fixture (bit-identical to 0.2.1)");
+    var C33 = ganita_mat_new(1, 1);
+    var e33 = amz_kmeans_update(one_two_two(), 3, 1, lab4(0, 0, 0, 0), 1, C33);
+    assert((e33 == 0) && (ganita_mat_get(C33, 0, 0) == 0x3FFAAAAAAAAAAAAB),
+      "update mean of {1,2,2} is 5/3, the nearest double (0.2.1's sum·(1/n) was 1 ulp low)");
+    var X7 = sevens();
+    var C7 = ganita_mat_new(1, 2);
+    var l7 = alloc(7 * 8); _amz_fill_words(l7, 7, 0);
+    amz_kmeans_update(X7, 7, 2, l7, 1, C7);
+    assert((ganita_mat_get(C7, 0, 0) == ganita_mat_get(X7, 0, 0))
+      && (ganita_mat_get(C7, 0, 1) == ganita_mat_get(X7, 0, 1)),
+      "the mean of 7 identical rows (0.1, 0.3) is that row exactly (sum / n is an ulp off)");
+    var TCn = ganita_mat_new(2, 2); set2(TCn, 0, 0, 0); ganita_mat_set(TCn, 1, 0, NAN);
+    assert(is_nan(amz_kmeans_assign(TX, 4, 2, TCn, 2, tlab)) == 1, "assign refuses a NaN centroid (NaN)");
+    assert(is_nan(amz_kmeans_assign(XN, 4, 2, TC, 2, tlab)) == 1, "assign refuses a NaN in X (NaN)");
+    assert(is_nan(amz_kmeans_assign(TX, 4, 2, TC, 2, 0)) == 1, "assign refuses a null out_labels (NaN)");
+    assert(is_nan(amz_kmeans_assign(TX, 4, 2, TC, 3, tlab)) == 1, "assign refuses k > rows(cents) (NaN)");
+    assert(amz_kmeans_update(TX, 4, 2, lab4(0, 0, 1, 2), 2, TC) == AMZ_ERR_ARG, "update refuses a label == k");
+    assert(amz_kmeans_update(TX, 4, 2, lab4(0, 0 - 1, 1, 1), 2, TC) == AMZ_ERR_ARG, "update refuses a negative label");
+    assert(amz_kmeans_update(TX, 4, 2, tlab, 3, TC) == AMZ_ERR_ARG, "update refuses out_cents with fewer than k rows");
+    assert(amz_kmeans_update(TX, 4, 2, 0, 2, TC) == AMZ_ERR_ARG, "update refuses null labels");
 
     test_group("k-means fit convergence");
     var model = amz_kmeans_fit(X, n, d, k, 50, 1337);
     var iters = amz_model_iters(model);
     var hist = amz_model_history(model);
     var labs = amz_model_labels(model);
-    assert(hist_monotone(hist, iters) == 1, "inertia history is non-increasing (Lloyd invariant)");
-    assert(iters < 50, "converged before max_iter on separable data");
+    assert(model != 0, "fit accepts the fixture");
+    assert(amz_inertia_monotone(hist, iters) == 1, "inertia history is non-increasing (Lloyd invariant)");
+    assert((amz_model_converged(model) == 1) && (iters < 50), "converged before max_iter on separable data");
     var chk = alloc(n * 8);
-    amz_kmeans_assign(X, n, d, amz_model_centroids(model), k, chk);
+    var chk_in = amz_kmeans_assign(X, n, d, amz_model_centroids(model), k, chk);
     assert(labels_eq(chk, labs, n) == 1, "post-fit assign is a fixed point (labels stable)");
-    assert(f64_gt(amz_purity(labs, y, n, k, k), f64_div(f64_from(94), f64_from(100))) == 1, "cluster purity > 94% on 3 blobs");
+    assert(chk_in == amz_model_inertia(model), "model inertia == inertia of its own centroids (bit-exact)");
+    assert(amz_model_inertia(model) == load64(hist + (iters - 1) * 8), "model inertia == last history entry");
+    assert(f64_gt(amz_purity(labs, y, n, k, k), f64_div(f64_from(94), f64_from(100))) == 1,
+      "cluster purity > 94% on 3 blobs");
     var model2 = amz_kmeans_fit(X, n, d, k, 50, 1337);
     assert(labels_eq(amz_model_labels(model2), labs, n) == 1, "fit reproducible under a fixed seed");
+    assert((amz_model_k(model) == k) && (amz_model_d(model) == d) && (amz_model_n(model) == n),
+      "model records k, d, n");
+    assert(amz_model_inertia(model) == 0x4069E12AE3CFB89F, "fit inertia known answer (identical to 0.2.1)");
+    assert(ganita_mat_get(amz_model_centroids(model), 2, 1) == 0x403EF0BAEB5BD2DE,
+      "fit centroid known answer (running mean; 0.2.1's sum·(1/n) gave 2 ulp more)");
+    assert(label_hash(labs, n) == 0x9388D24BB82F3B40, "fit labeling known answer (identical to 0.2.1)");
+
+    test_group("k-means fit contract");
+    assert((amz_kmeans_fit(X, 0, d, k, 50, 1) == 0) && (amz_kmeans_fit(X, n, d, 0, 50, 1) == 0),
+      "fit refuses n = 0 (was SIGFPE) and k = 0 (was SIGSEGV)");
+    assert(amz_kmeans_fit(X, n, d, n + 1, 50, 1) == 0, "fit refuses k > n");
+    assert((amz_kmeans_fit(X, n, d, k, 0, 1) == 0) && (amz_kmeans_fit(X, n, d, k, AMZ_KMEANS_MAX_ITER + 1, 1) == 0),
+      "fit refuses max_iter outside [1, AMZ_KMEANS_MAX_ITER]");
+    assert(amz_kmeans_fit(X, n, d, k, 2305843009213693952, 1) == 0, "fit refuses max_iter = 2^61 (was SIGSEGV)");
+    assert(amz_kmeans_fit(X, n, d, k, AMZ_KMEANS_MAX_ITER, 1337) != 0, "fit accepts max_iter at the cap");
+    assert((amz_kmeans_fit(0, n, d, k, 50, 1) == 0) && (amz_kmeans_fit(X, n, 3, k, 50, 1) == 0),
+      "fit refuses a null X and a column mismatch");
+    assert(amz_kmeans_fit(X, n + 1, d, k, 50, 1) == 0, "fit refuses n > rows(X)");
+    assert(amz_kmeans_fit(XN, 4, 2, 2, 50, 1) == 0, "fit refuses a NaN in X");
+    var XI = ganita_mat_new(4, 2); set2(XI, 0, 1, 1); set2(XI, 1, 2, 2); set2(XI, 2, 3, 3);
+    ganita_mat_set(XI, 3, 0, 0xFFF0000000000000);
+    assert(amz_kmeans_fit(XI, 4, 2, 2, 50, 1) == 0, "fit refuses an infinity in X");
+    assert((amz_model_k(0) == AMZ_ERR_ARG) && (amz_model_centroids(0) == 0) && (amz_model_labels(0) == 0),
+      "accessors are null-safe (count -> -2, pointer -> 0)");
+    assert((is_nan(amz_model_inertia(0)) == 1) && (amz_model_converged(0) == AMZ_ERR_ARG),
+      "accessors are null-safe (inertia -> NaN, converged -> -2)");
+    var m1 = amz_kmeans_fit(X, n, d, k, 1, 1337);
+    var lab1 = alloc(n * 8);
+    var in1 = amz_kmeans_assign(X, n, d, amz_model_centroids(m1), k, lab1);
+    assert((amz_model_iters(m1) == 1) && (amz_model_converged(m1) == 0), "max_iter = 1: one pass, not converged");
+    assert((labels_eq(lab1, amz_model_labels(m1), n) == 1) && (in1 == amz_model_inertia(m1)),
+      "budget-exhausted model is self-consistent: labels + inertia are its centroids' (was 528 vs 207)");
+    var m2 = amz_kmeans_fit(X, n, d, k, 2, 1337);
+    assert((amz_model_iters(m2) == 2) && (amz_model_converged(m2) == 1),
+      "max_iter = 2 converging on its last pass reports converged");
+    var XU = ganita_mat_new(200, 2);
+    rng_seed(99);
+    r = 0;
+    while (r < 200) { ganita_mat_set(XU, r, 0, rng_uniform()); ganita_mat_set(XU, r, 1, rng_uniform()); r = r + 1; }
+    var before = alloc_used();
+    var mu = amz_kmeans_fit(XU, 200, 2, 5, 100, 4242);
+    var used = alloc_used() - before;
+    var expect = (16 + 5 * 2 * 8) + 200 * 8 * 2 + 100 * 8 + 5 * 2 * 8 + 5 * 8 + 9 * 8;
+    assert(amz_model_iters(mu) >= 3, "uniform data needs several Lloyd passes");
+    assert(used == expect, "fit memory is fixed up front: no allocation per iteration (0.2.1 leaked 592 B/pass)");
+    assert(amz_inertia_monotone(amz_model_history(mu), amz_model_iters(mu)) == 1,
+      "inertia non-increasing over a multi-pass fit");
+    var XD = ganita_mat_new(5, 2);
+    r = 0;
+    while (r < 5) { set2(XD, r, 1, 1); r = r + 1; }
+    var md = amz_kmeans_fit(XD, 5, 2, 3, 50, 7);
+    assert((md != 0) && (amz_model_inertia(md) == 0) && (amz_model_converged(md) == 1),
+      "five identical points, k = 3: fits, inertia 0, converged");
+    assert(labels_eq(amz_model_labels(md), lab4(0, 0, 0, 0), 4) == 1, "identical points all label 0 (lowest tie)");
+    var m7 = amz_kmeans_fit(sevens(), 7, 2, 3, 50, 7);
+    assert((amz_model_iters(m7) == 2) && (amz_model_converged(m7) == 1) && (amz_model_inertia(m7) == 0),
+      "7 identical non-integer rows, k = 3: converged in 2 passes, inertia exactly 0 (fuzz finding)");
+    var mk = amz_kmeans_fit(TX, 4, 2, 4, 50, 7);
+    assert((amz_model_inertia(mk) == 0) && (amz_model_converged(mk) == 1), "k == n: every point its own centroid");
+    var m1k = amz_kmeans_fit(TX, 4, 2, 1, 50, 7);
+    var g = amz_model_centroids(m1k);
+    assert((feq(ganita_mat_get(g, 0, 0), f64_from(5)) == 1) && (feq(ganita_mat_get(g, 0, 1), f64_from(6)) == 1),
+      "k == 1: the centroid is the global mean (5, 6)");
+
+    test_group("inertia monotone");
+    var h3 = alloc(3 * 8);
+    store64(h3, f64_from(10)); store64(h3 + 8, f64_from(5)); store64(h3 + 16, f64_from(5));
+    assert(amz_inertia_monotone(h3, 3) == 1, "10, 5, 5 is non-increasing");
+    store64(h3 + 16, f64_from(6));
+    assert(amz_inertia_monotone(h3, 3) == 0, "10, 5, 6 rises");
+    var tiny = f64_div(f64_from(1), f64_from(1000000));
+    store64(h3, tiny); store64(h3 + 8, f64_mul(tiny, f64_from(2)));
+    assert(amz_inertia_monotone(h3, 2) == 0, "1e-6 -> 2e-6 rises (0.2.1's absolute slack of 1.0 passed it)");
+    var big = f64_mul(f64_from(1000000000), f64_from(1000000000));
+    store64(h3, big); store64(h3 + 8, f64_add(big, f64_from(1000)));
+    assert(amz_inertia_monotone(h3, 2) == 1, "1e18 -> 1e18 + 1000 is rounding-level (relative slack)");
+    assert((amz_inertia_monotone(h3, 1) == 1) && (amz_inertia_monotone(0, 3) == AMZ_ERR_ARG)
+      && (amz_inertia_monotone(h3, 0) == AMZ_ERR_ARG), "one entry is monotone; null / iters 0 refused");
+
+    test_group("purity");
+    var y6 = alloc(6 * 8); var l6 = alloc(6 * 8);
+    var i6 = 0;
+    while (i6 < 6) { store64(y6 + i6 * 8, i6 / 2); store64(l6 + i6 * 8, (i6 / 2 + 2) % 3); i6 = i6 + 1; }
+    assert(amz_purity(l6, y6, 6, 3, 3) == 0x3FF0000000000000, "a permuted perfect labeling has purity 1.0");
+    assert(amz_purity(lab4(0, 0, 0, 1), lab4(0, 0, 1, 1), 4, 2, 2) == 0x3FE8000000000000,
+      "clusters {0,0,1} + {1}: purity 3/4");
+    assert(amz_purity(lab4(7, 7, 2, 9), lab4(0, 0, 1, 1), 4, 10, 2) == 0x3FF0000000000000,
+      "k > n with sparse cluster ids is fine");
+    assert(is_nan(amz_purity(lab4(0, 0, 1, 1), lab4(0, 0, 1, 2), 4, 2, 2)) == 1, "purity refuses y == ncls (NaN)");
+    assert(is_nan(amz_purity(lab4(0, 0, 1, 1), lab4(0, 0 - 4398046511104, 1, 1), 4, 2, 2)) == 1,
+      "purity refuses a huge negative y (was SIGSEGV)");
+    assert(is_nan(amz_purity(lab4(0, 0, 1, 2), lab4(0, 0, 1, 1), 4, 2, 2)) == 1, "purity refuses a label == k (NaN)");
+    assert(is_nan(amz_purity(l6, y6, 0, 3, 3)) == 1, "purity refuses n = 0 (NaN)");
+    var agree = 1;
+    var trial = 0;
+    var lr = alloc(n * 8);
+    rng_seed(2026);
+    while (trial < 40) {
+        var kk = 1 + (rng_u64() & 7);
+        var t = 0;
+        while (t < n) { store64(lr + t * 8, (rng_u64() & 0x7FFFFFFFFFFFFFFF) % kk); t = t + 1; }
+        if (amz_purity(lr, y, n, kk, k) != purity_oracle(lr, y, n, kk, k)) { agree = 0; }
+        trial = trial + 1;
+    }
+    assert(agree == 1, "linked-list purity == the 0.2.1 O(k·n) algorithm on 40 random labelings (bit-exact)");
 
     test_group("prototype classifier");
     var protos = amz_proto_fit(X, n, d, y, k);
-    var py = alloc(4 * 8); store64(py, 0); store64(py + 8, 0); store64(py + 16, 1); store64(py + 24, 1);
+    var py = lab4(0, 0, 1, 1);
     var tp = amz_proto_fit(TX, 4, 2, py, 2);
-    assert((feq(ganita_mat_get(tp, 0, 1), f64_from(1)) == 1) && (feq(ganita_mat_get(tp, 1, 1), f64_from(11)) == 1), "prototype == analytic class mean");
+    assert((feq(ganita_mat_get(tp, 0, 1), f64_from(1)) == 1) && (feq(ganita_mat_get(tp, 1, 1), f64_from(11)) == 1),
+      "prototype == analytic class mean");
     assert(amz_proto_predict(tp, 2, 2, TX, 0) == 0, "predict -> class 0 for a class-0 point");
     assert(amz_proto_predict(tp, 2, 2, TX, 2) == 1, "predict -> class 1 for a class-1 point");
-    assert(f64_gt(amz_proto_accuracy(protos, k, d, X, n, y), f64_div(f64_from(94), f64_from(100))) == 1, "3-class accuracy > 94% on separable blobs");
+    assert(f64_gt(amz_proto_accuracy(protos, k, d, X, n, y), f64_div(f64_from(94), f64_from(100))) == 1,
+      "3-class accuracy > 94% on separable blobs");
     var n2 = 2 * n_per; var X2 = ganita_mat_new(n2, d); var y2 = alloc(n2 * 8);
     amz_make_blobs(n_per, d, 2, 5, X2, y2);
     var protos2 = amz_proto_fit(X2, n2, d, y2, 2);
-    assert(f64_gt(amz_proto_accuracy(protos2, 2, d, X2, n2, y2), f64_div(f64_from(94), f64_from(100))) == 1, "2-class accuracy > 94%");
+    assert(f64_gt(amz_proto_accuracy(protos2, 2, d, X2, n2, y2), f64_div(f64_from(94), f64_from(100))) == 1,
+      "2-class accuracy > 94%");
     var protos3 = amz_proto_fit(X, n, d, y, k);
     assert(amz_mat_eq(protos, protos3, k, d) == 1, "prototype fit is deterministic (byte-identical refit)");
+    assert(ganita_mat_get(protos, 0, 0) == 0x4023DFEA8E3DF6BB, "prototype known answer");
+    var p33 = amz_proto_fit(one_two_two(), 3, 1, lab4(0, 0, 0, 0), 1);
+    assert(ganita_mat_get(p33, 0, 0) == 0x3FFAAAAAAAAAAAAB, "prototype of {1,2,2} is 5/3, the nearest double");
+    var y7 = alloc(7 * 8); _amz_fill_words(y7, 7, 0);
+    var p7 = amz_proto_fit(X7, 7, 2, y7, 1);
+    assert((ganita_mat_get(p7, 0, 0) == ganita_mat_get(X7, 0, 0))
+      && (ganita_mat_get(p7, 0, 1) == ganita_mat_get(X7, 0, 1)),
+      "the prototype of 7 identical rows is that row exactly");
+    var X1 = ganita_mat_new(4, 1);
+    ganita_mat_set(X1, 0, 0, f64_from(5)); ganita_mat_set(X1, 1, 0, f64_from(7));
+    ganita_mat_set(X1, 2, 0, f64_from(0 - 7)); ganita_mat_set(X1, 3, 0, f64_from(0 - 5));
+    var pe = amz_proto_fit(X1, 4, 1, lab4(0, 0, 2, 2), 3);
+    var Q = ganita_mat_new(1, 1); ganita_mat_set(Q, 0, 0, f64_from(1));
+    assert(is_nan(ganita_mat_get(pe, 1, 0)) == 1, "a class with no rows has a NaN prototype (ADR 0004)");
+    assert(amz_proto_predict(pe, 3, 1, Q, 0) == 0, "an empty class is never predicted (0.2.1 picked it at x = 1)");
+    var pe0 = amz_proto_fit(X1, 4, 1, lab4(1, 1, 2, 2), 3);
+    assert(amz_proto_predict(pe0, 3, 1, Q, 0) == 1, "an empty class 0 is skipped too (the first candidate is NaN)");
+    assert(amz_proto_fit(TX, 4, 2, lab4(0, 0, 1, 2), 2) == 0,
+      "proto_fit refuses a label == ncls (was silent corruption)");
+    assert(amz_proto_fit(TX, 4, 2, lab4(0, 0, 1, 1099511627776), 2) == 0,
+      "proto_fit refuses a huge label (was SIGSEGV)");
+    assert(amz_proto_fit(TX, 4, 2, lab4(0, 0 - 1, 1, 1), 2) == 0, "proto_fit refuses a negative label");
+    assert((amz_proto_fit(XN, 4, 2, py, 2) == 0) && (amz_proto_fit(XI, 4, 2, py, 2) == 0),
+      "proto_fit refuses NaN and infinite X");
+    assert((amz_proto_fit(TX, 4, 2, py, 0) == 0) && (amz_proto_fit(TX, 4, 3, py, 2) == 0),
+      "proto_fit refuses ncls = 0 and a column mismatch");
+    assert((amz_proto_predict(tp, 2, 2, TX, 4) == AMZ_ERR_ARG)
+      && (amz_proto_predict(tp, 2, 2, TX, 0 - 1) == AMZ_ERR_ARG),
+      "predict refuses rx out of range");
+    assert(amz_proto_predict(tp, 2, 2, XN, 3) == AMZ_ERR_ARG, "predict refuses a NaN query");
+    assert(amz_proto_predict(tp, 2, 2, X1, 0) == AMZ_ERR_ARG, "predict refuses a query column mismatch");
+    var PN = ganita_mat_new(2, 2);
+    _amz_fill_words(_amz_row(PN, 0), 4, NAN);
+    assert(amz_proto_predict(PN, 2, 2, TX, 0) == AMZ_ERR_ARG, "predict refuses a set with no prototype at all");
+    assert(is_nan(amz_proto_accuracy(PN, 2, 2, TX, 4, py)) == 1, "accuracy is NaN with no prototype at all");
+    assert(is_nan(amz_proto_accuracy(tp, 2, 2, TX, 4, lab4(0, 0, 1, 2))) == 1, "accuracy refuses a label == ncls");
+    assert(is_nan(amz_proto_accuracy(tp, 2, 2, XN, 4, py)) == 1, "accuracy refuses a NaN in X");
 
     return assert_summary();
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+syscall(SYS_EXIT, exit_code);

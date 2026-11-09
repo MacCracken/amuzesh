@@ -1,16 +1,265 @@
-# amuzesh fuzz harness
+# amuzesh fuzz harness — the public surface against randomized shapes and hostile input.
+#
+# Each round draws a matrix (1..40 rows, 1..5 columns) at one of four magnitudes, with
+# duplicated rows and an injected NaN / ±inf some of the time, then calls every public
+# entry point with arguments that are valid most of the time and broken some of the
+# time (n / d / k / ncls / rx out of range, labels outside their range, max_iter 0 or
+# past the cap or 2^61). The harness decides validity itself from the contract in
+# src/check.cyr (ADR 0002), independently of the library, and checks two things:
+#
+#   - a valid call succeeds and its result holds the documented invariants (labels in
+#     range; the model self-consistent and, when converged, a fixed point; inertia
+#     non-increasing; empty classes NaN and never predicted; predict the true argmin;
+#     purity equal to the O(k·n) oracle, bit for bit);
+#   - an invalid call is refused in the vocabulary (0 / -2 / NaN), and nothing crashes.
+#
+# The case generator is a local splitmix64, because amz_kmeans_fit and amz_make_blobs
+# reseed tyche's global stream. Exits 1 on any violation.
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "lib/ganita.cyr"
+include "lib/tyche.cyr"
+include "src/dist.cyr"
+include "src/check.cyr"
+include "src/kmeans.cyr"
+include "src/proto.cyr"
+include "src/data.cyr"
+
+var _fz_fail = 0;
+var _fz_state = 0x2545F4914F6CDD1D;
+var _fz_fits = 0;
+var _fz_refused = 0;
+
+# Count a violation; print the first ten.
+fn _fz_check(ok, what): i64 {
+    if (ok == 0) {
+        _fz_fail = _fz_fail + 1;
+        if (_fz_fail <= 10) { println(what); }
+    }
     return 0;
 }
 
-fn main() {
+# splitmix64: the harness's own stream, independent of tyche's global state.
+fn _fz_next(): i64 {
+    _fz_state = _fz_state + 0x9E3779B97F4A7C15;
+    var z = _fz_state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
+# A draw in [0, m) for m >= 1.
+fn _fz_below(m): i64 { return (_fz_next() & 0x7FFFFFFFFFFFFFFF) % m; }
+# An f64 in [0, 1) from the harness stream.
+fn _fz_unit(): i64 { return f64_mul(f64_from((_fz_next() >> 11) & 0x1FFFFFFFFFFFFF), 0x3CA0000000000000); }
+
+# The 0.2.1 purity algorithm: an independent O(k·n) oracle.
+fn _fz_purity_oracle(labels, y, n, k, ncls): i64 {
+    var hist = alloc(ncls * 8);
+    var total = 0;
+    var j = 0;
+    while (j < k) {
+        _amz_fill_words(hist, ncls, 0);
+        var i = 0;
+        while (i < n) {
+            if (load64(labels + i * 8) == j) {
+                var slot = hist + load64(y + i * 8) * 8;
+                store64(slot, load64(slot) + 1);
+            }
+            i = i + 1;
+        }
+        var mx = 0;
+        var c = 0;
+        while (c < ncls) { if (load64(hist + c * 8) > mx) { mx = load64(hist + c * 8); } c = c + 1; }
+        total = total + mx;
+        j = j + 1;
+    }
+    return f64_div(f64_from(total), f64_from(n));
+}
+
+# n labels drawn in [0, k), with one pushed out of range (k, -1 or 2^40) one time in 16.
+fn _fz_labels(n, k): i64 {
+    var p = alloc(n * 8);
+    var i = 0;
+    while (i < n) { store64(p + i * 8, _fz_below(k)); i = i + 1; }
+    if (_fz_below(16) == 0) {
+        var bad = k;
+        var w = _fz_below(3);
+        if (w == 1) { bad = 0 - 1; }
+        if (w == 2) { bad = 1099511627776; }
+        store64(p + _fz_below(n) * 8, bad);
+    }
+    return p;
+}
+
+# A matrix argument that is the real X most of the time, sometimes null.
+fn _fz_maybe_null(m): i64 { if (_fz_below(40) == 0) { return 0; } return m; }
+
+# One round: build a case, exercise every public entry point, check the contract.
+fn fuzz_round(): i64 {
+    var rows = 1 + _fz_below(40);
+    var cols = 1 + _fz_below(5);
+    var X = ganita_mat_new(rows, cols);
+    var scale = f64_from(1);
+    var sw = _fz_below(4);
+    if (sw == 1) { scale = f64_div(f64_from(1), f64_from(1000000)); }
+    if (sw == 2) { scale = f64_from(1000000); }
+    if (sw == 3) { scale = 0x54B249AD2594C37D; }   # 1e100
+    var dup = (_fz_below(10) == 0);
+    var r = 0;
+    while (r < rows) {
+        var c = 0;
+        var blob = f64_from(_fz_below(4) * 4);
+        while (c < cols) {
+            var v = f64_mul(scale, f64_add(blob, f64_sub(f64_mul(_fz_unit(), f64_from(2)), f64_from(1))));
+            if ((dup == 1) && (r > 0)) { v = ganita_mat_get(X, 0, c); }
+            ganita_mat_set(X, r, c, v);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    var bad_row = 0 - 1;
+    if (_fz_below(16) == 0) {
+        var bad = AMZ_NAN;
+        var w = _fz_below(3);
+        if (w == 1) { bad = 0x7FF0000000000000; }
+        if (w == 2) { bad = 0xFFF0000000000000; }
+        bad_row = _fz_below(rows);
+        ganita_mat_set(X, bad_row, _fz_below(cols), bad);
+    }
+    var n = rows;
+    var nw = _fz_below(20);
+    if (nw == 0) { n = 0; }
+    if (nw == 1) { n = rows + 1; }
+    if (nw == 2) { n = 1 + _fz_below(rows); }
+    var d = cols;
+    if (_fz_below(20) == 0) { d = cols + 1; }
+    # Only the first n rows are input: a NaN past them is outside what the call judges.
+    var finite = (bad_row < 0) || (bad_row >= n);
+    var Xa = _fz_maybe_null(X);
+    var shape_ok = (Xa != 0) && (n >= 1) && (n <= rows) && (d == cols);
+    var k = _fz_below(rows + 3);
+    var mi = 1 + _fz_below(20);
+    var mw = _fz_below(16);
+    if (mw == 0) { mi = 0; }
+    if (mw == 1) { mi = AMZ_KMEANS_MAX_ITER + 1; }
+    if (mw == 2) { mi = 2305843009213693952; }
+    var seed = _fz_next();
+
+    # ---- amz_kmeans_fit ----
+    var fit_ok = shape_ok && (finite == 1) && (k >= 1) && (k <= n) && (mi >= 1) && (mi <= AMZ_KMEANS_MAX_ITER);
+    var m = amz_kmeans_fit(Xa, n, d, k, mi, seed);
+    _fz_check((m != 0) == fit_ok, "FAIL: fit accepted / refused against the contract");
+    if (m != 0) {
+        _fz_fits = _fz_fits + 1;
+        var it = amz_model_iters(m);
+        var conv = amz_model_converged(m);
+        var L = amz_model_labels(m);
+        _fz_check((it >= 1) && (it <= mi), "FAIL: fit iters outside [1, max_iter]");
+        _fz_check((conv == 1) || ((conv == 0) && (it == mi)), "FAIL: not converged before max_iter");
+        _fz_check(_amz_labels_ok(L, n, k), "FAIL: fit label outside [0, k)");
+        var chk = alloc(n * 8);
+        var cin = amz_kmeans_assign(X, n, d, amz_model_centroids(m), k, chk);
+        _fz_check(_amz_words_eq(chk, L, n), "FAIL: model labels are not its centroids' nearest labels");
+        _fz_check(cin == amz_model_inertia(m), "FAIL: model inertia is not its centroids' inertia");
+        _fz_check(amz_inertia_monotone(amz_model_history(m), it) == 1, "FAIL: inertia rose");
+    } else { _fz_refused = _fz_refused + 1; }
+
+    # ---- amz_kmeans_pp_seed / assign / update ----
+    var kc = 1 + _fz_below(rows + 1);
+    var C = ganita_mat_new(kc, cols);
+    var kp = _fz_below(kc + 2);
+    var pp_ok = shape_ok && (finite == 1) && (kp >= 1) && (kp <= n) && (kp <= kc);
+    rng_seed(seed);
+    var ps = amz_kmeans_pp_seed(Xa, n, d, kp, C);
+    _fz_check((ps == 0) == pp_ok, "FAIL: pp_seed accepted / refused against the contract");
+    _fz_check((ps == 0) || (ps == AMZ_ERR_ARG), "FAIL: pp_seed status outside {0, -2}");
+    if (ps == 0) {
+        var lab = alloc(rows * 8);
+        var ain = amz_kmeans_assign(X, n, d, C, kp, lab);
+        _fz_check(_amz_is_nan(ain) == 0, "FAIL: assign refused a valid call");
+        _fz_check(_amz_labels_ok(lab, n, kp), "FAIL: assign label outside [0, k)");
+    }
+    var ul = _fz_labels(rows, kc);
+    var up_ok = shape_ok && _amz_labels_ok(ul, n, kc);
+    var ue = amz_kmeans_update(Xa, n, d, ul, kc, C);
+    _fz_check(((ue >= 0) && (ue <= kc)) == up_ok, "FAIL: update accepted / refused against the contract");
+    _fz_check((ue >= 0) || (ue == AMZ_ERR_ARG), "FAIL: update status outside {count, -2}");
+
+    # ---- amz_purity ----
+    var ncls = 1 + _fz_below(6);
+    var pl = _fz_labels(rows, kc);
+    var py = _fz_labels(rows, ncls);
+    # The label arrays hold `rows` entries and carry no length, so a count past `rows` is the
+    # caller's own out-of-bounds read (the contract's one unchecked input), not a refusal.
+    var pn = n;
+    if (pn > rows) { pn = rows; }
+    var pu = amz_purity(pl, py, pn, kc, ncls);
+    var pu_ok = (pn >= 1) && _amz_labels_ok(pl, pn, kc) && _amz_labels_ok(py, pn, ncls);
+    _fz_check((_amz_is_nan(pu) == 0) == pu_ok, "FAIL: purity accepted / refused against the contract");
+    if (pu_ok) { _fz_check(pu == _fz_purity_oracle(pl, py, pn, kc, ncls), "FAIL: purity != oracle"); }
+
+    # ---- amz_proto_fit / predict / accuracy ----
+    var nc = _fz_below(7);
+    var y = _fz_labels(rows, nc + (nc == 0));
+    var pf_ok = shape_ok && (finite == 1) && (nc >= 1) && _amz_labels_ok(y, n, nc);
+    var P = amz_proto_fit(Xa, n, d, y, nc);
+    _fz_check((P != 0) == pf_ok, "FAIL: proto_fit accepted / refused against the contract");
+    if (P != 0) {
+        var cnt = alloc(nc * 8);
+        _amz_fill_words(cnt, nc, 0);
+        var i = 0;
+        while (i < n) { var s = cnt + load64(y + i * 8) * 8; store64(s, load64(s) + 1); i = i + 1; }
+        var j = 0;
+        while (j < nc) {
+            var row = _amz_row(P, j);
+            if (load64(cnt + j * 8) > 0) {
+                _fz_check(_amz_words_finite(row, cols), "FAIL: populated prototype not finite");
+            } else { _fz_check(_amz_is_nan(load64(row)), "FAIL: empty class prototype is not NaN"); }
+            j = j + 1;
+        }
+        var rx = _fz_below(rows + 2) - 1;
+        var cls = amz_proto_predict(P, nc, cols, X, rx);
+        if ((rx >= 0) && (rx < rows)) {
+            _fz_check((cls >= 0) && (cls < nc), "FAIL: predict refused a valid query");
+            if ((cls >= 0) && (cls < nc)) {
+                _fz_check(load64(cnt + cls * 8) > 0, "FAIL: predict chose an empty class");
+                var dbest = amz_sqdist(X, rx, P, cls, cols);
+                var c2 = 0;
+                while (c2 < nc) {
+                    if (load64(cnt + c2 * 8) > 0) {
+                        _fz_check(f64_lt(amz_sqdist(X, rx, P, c2, cols), dbest) == 0, "FAIL: predict not the argmin");
+                    }
+                    c2 = c2 + 1;
+                }
+            }
+        } else { _fz_check(cls == AMZ_ERR_ARG, "FAIL: predict accepted rx out of range"); }
+        var acc = amz_proto_accuracy(P, nc, cols, X, n, y);
+        _fz_check((f64_lt(acc, 0) == 0) && (f64_gt(acc, f64_from(1)) == 0) && (_amz_is_nan(acc) == 0),
+          "FAIL: accuracy outside [0, 1]");
+    }
+
+    # ---- amz_make_blobs ----
+    var bn = _fz_below(4);
+    var bk = _fz_below(4);
+    var B = ganita_mat_new(1 + _fz_below(12), cols);
+    var by = _fz_maybe_null(alloc(16 * 8));
+    var b_ok = (bn >= 1) && (bk >= 1) && (B != 0) && (bk * bn <= ganita_mat_rows(B)) && (by != 0);
+    var bres = amz_make_blobs(bn, cols, bk, seed, B, by);
+    _fz_check((bres == bk * bn) == b_ok, "FAIL: make_blobs accepted / refused against the contract");
+    _fz_check(b_ok || (bres == AMZ_ERR_ARG), "FAIL: make_blobs refusal is not -2");
+    return 0;
+}
+
+# Runs 10,000 rounds (about 33 MB of never-freed heap); exits 1 on any violation.
+fn main(): i64 {
     alloc_init();
-    fuzz_main("test", 4);
+    var round = 0;
+    while (round < 10000) { fuzz_round(); round = round + 1; }
+    print("fuzz: 10000 rounds, ", 20); fmt_int(_fz_fits); print(" fits, ", 7); fmt_int(_fz_refused);
+    print(" refused, ", 10); fmt_int(_fz_fail); println(" violations");
+    if (_fz_fail != 0) { return 1; }
     println("fuzz: ok");
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

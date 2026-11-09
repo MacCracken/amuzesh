@@ -17,11 +17,11 @@ _Define before tagging v0.1.0:_
 
 ## Milestones
 
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-06-27
+### M0 — k-means + k-means++ + nearest-centroid prototype classifier (v0.1.0) — ✅ shipped 2026-06-27
 
-- `cyrius init` scaffold landed
-- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
-- ADRs / architecture notes / guides / examples folders ready
+- `cyrius init` scaffold, doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
+- k-means (Lloyd) with k-means++ seeding, the nearest-centroid classifier, cluster purity; the M0 demo gate
+- **P(-1) sweep — ✅ 0.2.2, 2026-11-09** ([audit](../audit/2026-11-09-audit.md)): validated public surface (ADR 0002), the empty-class and budget-exhaustion repairs, the running mean, 2.2–4.3× faster kernels, fuzz + mutation-tested suite
 
 ### M1 — _Title_ (v0.2.0)
 

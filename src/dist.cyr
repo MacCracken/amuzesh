@@ -1,30 +1,116 @@
-# amuzesh — shared distance / row helpers.
+# amuzesh — shared row access and distance kernels.
 #
 # These are the ONLY model-level numeric primitives amuzesh adds; everything below
-# them (matrix storage / access, PRNG) comes from ganita + tyche. All values are f64
-# bit patterns stored in i64 (the everything-is-i64 family convention).
+# them (matrix storage, PRNG) comes from ganita + tyche. All values are f64 bit
+# patterns stored in i64 (the everything-is-i64 family convention).
 #
-# Include AFTER lib/ganita.cyr (ganita_mat_get).
+# ⚠ UNCHECKED BY DESIGN. Every function in this file is an inner-loop kernel: it does
+# no bounds, null or finiteness test, exactly like ganita_mat_get / ganita_mat_set.
+# The public entry points in kmeans.cyr / proto.cyr / data.cyr validate their
+# arguments once (src/check.cyr) and then call these. A caller using them directly
+# owns the preconditions stated on each function.
+#
+# Include AFTER lib/ganita.cyr.
 
-# Squared euclidean distance between row ra of matrix A and row rb of matrix B over
-# d columns. Uses the public ganita_mat_get accessor — no header-layout assumption.
-fn amz_sqdist(A, ra, B, rb, d): i64 {
+# Address of row r of ganita matrix m (ADR 0003). ganita lays a matrix out as
+# { rows: i64, cols: i64, data: f64[rows*cols] } row-major, and documents
+# ganita_mat_get as reading `m + 16 + (r*cols + c)*8`; this is that address with
+# c = 0. tests/amuzesh.tcyr pins it against ganita_mat_get, so a layout change in
+# ganita fails the suite instead of reading the wrong memory.
+# Precondition: m is a ganita matrix and 0 <= r < rows(m).
+#inline
+fn _amz_row(m, r): i64 {
+    return m + 16 + r * load64(m + 8) * 8;
+}
+
+# Squared euclidean distance between two rows of d f64 values, given their addresses.
+# Precondition: pa and pb each point at d readable f64 values.
+fn _amz_sqdist_ptr(pa, pb, d): i64 {
     var acc = f64_from(0);
-    var c = 0;
-    while (c < d) {
-        var diff = f64_sub(ganita_mat_get(A, ra, c), ganita_mat_get(B, rb, c));
+    var end = pa + d * 8;
+    while (pa < end) {
+        var diff = f64_sub(load64(pa), load64(pb));
         acc = f64_add(acc, f64_mul(diff, diff));
-        c = c + 1;
+        pa = pa + 8;
+        pb = pb + 8;
     }
     return acc;
 }
 
-# Copy row rs of matrix src into row rd of matrix dst (d columns).
+# Partial-distance search: like _amz_sqdist_ptr, but stops as soon as the running sum is no
+# longer below `bound` and returns that partial sum (>= bound). Adding a non-negative
+# square never lowers an f64 sum, so a cut row could not have won a strict `< bound` test:
+# every argmin decision, and the winner's full distance, is bit-identical to the full sum.
+fn _amz_sqdist_lt(pa, pb, d, bound): i64 {
+    var acc = f64_from(0);
+    var end = pa + d * 8;
+    while (pa < end) {
+        var diff = f64_sub(load64(pa), load64(pb));
+        acc = f64_add(acc, f64_mul(diff, diff));
+        if (f64_lt(acc, bound) == 0) { return acc; }
+        pa = pa + 8;
+        pb = pb + 8;
+    }
+    return acc;
+}
+
+# Squared euclidean distance between row ra of matrix A and row rb of matrix B over the
+# first d columns. Precondition: ra and rb are in range and d <= cols of both.
+fn amz_sqdist(A, ra, B, rb, d): i64 {
+    return _amz_sqdist_ptr(_amz_row(A, ra), _amz_row(B, rb), d);
+}
+
+# Copy row rs of matrix src into row rd of matrix dst (the first d columns).
+# Precondition: rs and rd are in range and d <= cols of both. Returns 0.
 fn amz_copy_row(src, rs, dst, rd, d): i64 {
+    var ps = _amz_row(src, rs);
+    var pd = _amz_row(dst, rd);
     var c = 0;
-    while (c < d) {
-        ganita_mat_set(dst, rd, c, ganita_mat_get(src, rs, c));
-        c = c + 1;
+    while (c < d) { store64(pd + c * 8, load64(ps + c * 8)); c = c + 1; }
+    return 0;
+}
+
+# Store v into each of the count i64 slots starting at p.
+fn _amz_fill_words(p, count, v): i64 {
+    var end = p + count * 8;
+    while (p < end) { store64(p, v); p = p + 8; }
+    return 0;
+}
+
+# Per-label means of the rows of X (n×d), by Welford's running mean: each row with label
+# j counts toward j and moves means[j] by (x − mean)·(1/count). `means` is k·d contiguous
+# words (row j at means + j·d·8) and `counts` k words; both are overwritten. A label with
+# no rows leaves count 0 and a zero row.
+#
+# Why not sum / count: the mean of identical rows must be that row, exactly. A running
+# sum of n copies of x, divided by n, is generally an ulp off x, and k-means then sees a
+# centroid move off its points: ties shift labels for up to k passes and the inertia
+# rises from 0 to rounding noise (found by the fuzz harness, 2026-11-09). Here the
+# increment for an identical row is exactly 0. The running mean's error also does not
+# grow with the cluster's size, and it overflows only when the data's range exceeds
+# DBL_MAX, where a sum overflows once n·max|x| does.
+# Precondition: every label is in [0, k); X has at least n rows of d columns.
+fn _amz_label_means(X, n, d, labels, k, means, counts): i64 {
+    var stride = d * 8;
+    _amz_fill_words(means, k * d, 0);   # +0.0
+    _amz_fill_words(counts, k, 0);
+    var px = _amz_row(X, 0);
+    var i = 0;
+    while (i < n) {
+        var lab = load64(labels + i * 8);
+        var cnt = load64(counts + lab * 8) + 1;
+        store64(counts + lab * 8, cnt);
+        var inv = f64_div(f64_from(1), f64_from(cnt));   # exactly 1.0 for a cluster's first row
+        var pm = means + lab * stride;
+        var c = 0;
+        while (c < d) {
+            var m = load64(pm + c * 8);
+            store64(pm + c * 8, f64_add(m, f64_mul(f64_sub(load64(px + c * 8), m), inv)));
+            c = c + 1;
+        }
+        px = px + stride;
+        i = i + 1;
     }
     return 0;
 }
+

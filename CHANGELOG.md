@@ -4,6 +4,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-09
+
+The P(-1) audit, hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md). Every public function
+now validates its input and fails the way ganita does. Five correctness defects are
+repaired, and the kernels are 2.2–4.3× faster with bit-identical decisions. The blobs,
+seeds, assignments, the fit's labels and inertia, and the demo's output are
+bit-identical to 0.2.1. Centroids and prototypes move by 1–2 ulp, toward the exact mean.
+
+### Security
+
+- **An out-of-range label no longer writes outside the heap block** (HIGH, CWE-787). Class
+  labels in `amz_proto_fit` / `amz_purity` and cluster labels in `amz_kmeans_update` were
+  row indices for an unchecked write. A label of 2^40 crashed. A label equal to `ncls`
+  silently corrupted the neighbouring prototype. Every label is now checked against its
+  range before anything is written.
+- **Degenerate arguments are refused instead of crashing:** `n = 0` (was SIGFPE), `k = 0`
+  and an unchecked null matrix (SIGSEGV), `k > n`, and a `max_iter` whose history size
+  wrapped (SIGSEGV at 2^61). `max_iter` is capped at `AMZ_KMEANS_MAX_ITER` (10,000), and
+  every allocation is overflow-checked and null-checked.
+- **CI holds less privilege.** `contents: read` by default, `contents: write` only on
+  the release job, and `persist-credentials: false` on every checkout, so the token is
+  never in `.git/config` when the `curl | sh` installer runs.
+
+### Added
+
+- **`src/check.cyr`**: argument validation and the failure vocabulary
+  ([ADR 0002](docs/adr/0002-failure-vocabulary-and-validation.md)). A pointer result is
+  `0`, a status is `AMZ_ERR_ALLOC` (−1) or `AMZ_ERR_ARG` (−2), an f64 is NaN. Functions
+  that judge their input refuse NaN and ±∞ (ganita ADR 0004's rule). Consumers include
+  it after `src/dist.cyr`.
+- **`amz_model_converged(m)`**: 1 at a label fixed point, 0 if `max_iter` ran out. The
+  model record has 9 slots.
+- **`amz_inertia_monotone(history, iters)`**: Lloyd's non-increasing invariant, with a
+  relative 1e-9 slack. The demo and the tests use it. It replaces their scale-dependent
+  copies, which used an absolute slack of 1.0.
+- **A real fuzz harness** (`tests/amuzesh.fcyr`): 10,000 rounds of randomized shapes,
+  magnitudes, duplicates, NaN / ±∞, and broken arguments against every public function.
+  It decides validity independently of the library and checks invariants on success and
+  refusals on failure.
+- **Real benchmarks** (`tests/amuzesh.bcyr`, 8 rows), `scripts/bench-history.sh` and
+  `bench-history.csv` (the before and after stamps), and `docs/benchmarks.md`.
+- **Docs**: `docs/api.md`, `docs/sources.md`, `SECURITY.md`, ADRs 0002–0004, architecture
+  note 001 (the heap never frees), and the audit report.
+- **CI**: version consistency, fmt `--check`, lint (any warning fails), vet, the M0 gate
+  (the demo was built but never run), fuzz, the suite, fuzz and gate on aarch64 under
+  qemu, and benchmarks (informational). Also a `.gitattributes` (`lib/** -text`, the
+  `cyrius init` template), so a CRLF checkout cannot fail `cyrius deps --verify`.
+
+### Fixed
+
+- **A class with no training rows was predicted**: its zero prototype won queries near
+  the origin. Its prototype is now NaN and prediction skips it
+  ([ADR 0004](docs/adr/0004-empty-class-has-no-prototype.md)).
+- **A fit that ran out of `max_iter` returned labels and inertia for the previous
+  centroids** (repro: inertia 528 against 207 for the returned centroids). The final
+  update is now skipped, so a model always agrees with itself.
+- **The mean of identical rows was not exact** (found by the new fuzz harness). Seven rows
+  of 0.1 averaged to 0.09999999999999999, so k-means on duplicated data marched its
+  labels for up to k extra passes and its inertia rose from 0. Means are now Welford's
+  running mean, which is exact on identical rows and closer to the exact mean in general
+  (worst coordinate 1.43 ulp on the fixture, was 2.03).
+- **One NaN in the data produced a silently useless model** (NaN inertia, 33% purity). It
+  is now refused.
+- **Every Lloyd pass leaked its scratch** (592 B per pass at k = d = 8). The fit now
+  allocates once.
+- **Null model accessors crashed.** They now return 0, −2 or NaN.
+
+### Changed
+
+- **Kernels are 2.2–4.3× faster**, decisions bit-identical. `kmeans_fit` 3.83 → 0.89 ms,
+  `kmeans_assign` 813 → 209 µs, `kmeans_pp_seed` 855 → 203 µs, `proto_predict` 801 →
+  295 ns (n = 1,024, d = 8, k = 8; median of 3). The speed comes from:
+  - direct row access, pinned against `ganita_mat_get` by a test
+    ([ADR 0003](docs/adr/0003-direct-row-access.md));
+  - partial-distance search in assignment, seeding and prediction;
+  - a k-means++ walk that stops at its pick;
+  - label buffers swapped instead of copied.
+- **`amz_purity` is O(n + k + ncls)**, was O(k·n), and gives bit-identical results:
+  57× faster at k = 512.
+- Test, bench and fuzz files exit through `SYS_EXIT`, not x86_64's literal `syscall(60)`.
+- Suite **123/123** (was 23) on x86_64 and aarch64. It pins exact bit patterns for the
+  blobs, seeds, assignment and fit. All 14 audit mutants are killed. Reference coverage is
+  21/23 functions (was 15/21). fmt, lint and doc are clean (were 9 warnings and 18
+  undocumented functions).
+
 ## [0.2.1] - 2026-11-09
 
 ### Changed

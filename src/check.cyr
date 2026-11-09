@@ -1,0 +1,97 @@
+# amuzesh — argument validation and the failure vocabulary (ADR 0002).
+#
+# One vocabulary across the public surface, ganita's (ganita ADR 0001):
+#
+#   the function returns                          on failure
+#   a pointer (a model, a prototype matrix)       0
+#   a status, a count or a class index (>= 0)     AMZ_ERR_ALLOC (-1) or AMZ_ERR_ARG (-2)
+#   an f64 (inertia, purity, accuracy)            NaN (AMZ_NAN)
+#
+# and ganita's rule for NaN and infinity (ganita ADR 0004): a function that JUDGES its
+# input (fit, seeding, assignment, prototype fit, predict, accuracy) refuses a non-finite
+# entry before it writes anything; a function that only CARRIES values
+# (amz_kmeans_update, a mean) propagates them, as IEEE arithmetic does.
+#
+# Every public entry point validates once, here, and then runs the unchecked kernels in
+# src/dist.cyr. Raw i64 arrays (labels, y) carry no length, so their length is the
+# caller's `n` — the one thing amuzesh cannot check.
+#
+# Include AFTER lib/ganita.cyr, src/dist.cyr.
+
+var AMZ_ERR_ALLOC = 0 - 1;               # an allocation failed
+var AMZ_ERR_ARG = 0 - 2;                 # an argument broke the contract (null, shape, range, NaN)
+var AMZ_NAN = 0x7FF8000000000000;        # quiet NaN: the f64 failure value
+
+# Policy cap on max_iter (ADR 0002). A fit allocates its inertia history up front, so the
+# cap bounds what one call can take from the never-freeing heap: 10,000 × 8 B = 80 KB.
+var AMZ_KMEANS_MAX_ITER = 10000;
+
+# 1 if the f64 bit pattern x is finite (not NaN, not ±inf). Tests the exponent bits, so
+# it does not depend on how a target compares a NaN.
+#inline
+fn _amz_is_finite(x): i64 {
+    return (x & 0x7FF0000000000000) != 0x7FF0000000000000;
+}
+
+# 1 if the f64 bit pattern x is a NaN (either sign, quiet or signalling).
+#inline
+fn _amz_is_nan(x): i64 {
+    return (x & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000;
+}
+
+# 1 if every one of the count f64 values starting at address p is finite.
+fn _amz_words_finite(p, count): i64 {
+    var end = p + count * 8;
+    while (p < end) {
+        if (_amz_is_finite(load64(p)) == 0) { return 0; }
+        p = p + 8;
+    }
+    return 1;
+}
+
+# 1 if m is a ganita matrix with at least `rows` rows and exactly `cols` columns, and
+# both requested sizes are positive. Exact columns: a d that disagrees with the matrix
+# is a caller bug, never a request to use a column prefix.
+fn _amz_mat_ok(m, rows, cols): i64 {
+    if (m == 0) { return 0; }
+    if ((rows < 1) || (cols < 1)) { return 0; }
+    if (ganita_mat_rows(m) < rows) { return 0; }
+    if (ganita_mat_cols(m) != cols) { return 0; }
+    return 1;
+}
+
+# 1 if the first `rows` rows of m (cols columns each) are all finite.
+# Precondition: _amz_mat_ok(m, rows, cols).
+fn _amz_mat_finite(m, rows, cols): i64 {
+    return _amz_words_finite(_amz_row(m, 0), rows * cols);
+}
+
+# 1 if labels is non-null and each of its n i64 entries lies in [0, k).
+fn _amz_labels_ok(labels, n, k): i64 {
+    if (labels == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var v = load64(labels + i * 8);
+        if ((v < 0) || (v >= k)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 if the n i64 words at a and b are pairwise equal (stops at the first difference).
+fn _amz_words_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Allocate `count` i64 slots, or return 0 for a count below 1 or one whose byte size
+# would exceed ALLOC_MAX (so `count * 8` cannot wrap). Not zeroed.
+fn _amz_alloc_words(count): i64 {
+    if (count < 1) { return 0; }
+    if (count > ALLOC_MAX / 8) { return 0; }
+    return alloc(count * 8);
+}

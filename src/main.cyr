@@ -5,50 +5,57 @@
 
 include "lib/ganita.cyr"   # ganita_mat_* (matrix storage / access)
 include "lib/tyche.cyr"    # rng_seed / rng_uniform / rng_u64 / rng_normal
-include "src/dist.cyr"     # amz_sqdist / amz_copy_row
+include "src/dist.cyr"     # row access + distance kernels (unchecked)
+include "src/check.cyr"    # validation + the failure vocabulary
 include "src/kmeans.cyr"   # k-means++ + Lloyd + model + purity
 include "src/proto.cyr"    # nearest-centroid prototype classifier
 include "src/data.cyr"     # amz_make_blobs
 
+# Write one byte to stdout.
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# Write a NUL-terminated string to stdout.
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
-fn print_pct(frac): i64 { fmt_int(f64_to(f64_mul(frac, f64_from(100)))); return 0; }   # frac -> integer %
+# Print an f64 fraction as a truncated integer percentage.
+fn print_pct(frac): i64 { fmt_int(f64_to(f64_mul(frac, f64_from(100)))); return 0; }
 
+# Run the M0 gate: RETURNS 0 on pass, 1 on a failed gate, 2 if a call was refused.
 fn main(): i64 {
     alloc_init();
     var n_per = 40; var d = 2; var k = 3;
     var n = k * n_per;
     var X = ganita_mat_new(n, d);
     var y = alloc(n * 8);
-    amz_make_blobs(n_per, d, k, 7, X, y);
+    if (amz_make_blobs(n_per, d, k, 7, X, y) != n) { puts("  amz_make_blobs refused\n"); return 2; }
 
     puts("amuzesh M0 — classical / shallow ML on the ganita + tyche substrate\n");
-    puts("  data: "); fmt_int(n); puts(" points, "); fmt_int(d); puts("-D, "); fmt_int(k); puts(" separable blobs\n");
+    puts("  data: "); fmt_int(n); puts(" points, "); fmt_int(d); puts("-D, "); fmt_int(k);
+    puts(" separable blobs\n");
 
     # ---- k-means (++ seeded) ----
     var model = amz_kmeans_fit(X, n, d, k, 50, 1337);
+    if (model == 0) { puts("  amz_kmeans_fit refused\n"); return 2; }
     var iters = amz_model_iters(model);
     var hist = amz_model_history(model);
-    puts("  k-means++ Lloyd: converged in "); fmt_int(iters); puts(" iters\n");
+    if (amz_model_converged(model) == 1) { puts("  k-means++ Lloyd: converged in "); }
+    else { puts("  k-means++ Lloyd: NOT converged after "); }
+    fmt_int(iters); puts(" iters\n");
     puts("  inertia trace:");
-    var t = 0; var mono = 1;
-    while (t < iters) {
-        puts(" "); fmt_int(f64_to(load64(hist + t * 8)));
-        if (t > 0) {
-            if (f64_gt(load64(hist + t * 8), f64_add(load64(hist + (t - 1) * 8), f64_from(1))) == 1) { mono = 0; }
-        }
-        t = t + 1;
-    }
+    var t = 0;
+    while (t < iters) { puts(" "); fmt_int(f64_to(load64(hist + t * 8))); t = t + 1; }
     _putc(10);
+    var mono = amz_inertia_monotone(hist, iters);
     if (mono == 1) { puts("  inertia: non-increasing [ok]\n"); }
+    else { puts("  inertia: ROSE between iterations [FAIL]\n"); }
     var purity = amz_purity(amz_model_labels(model), y, n, k, k);
     puts("  cluster purity: "); print_pct(purity); puts("%\n");
 
     # ---- nearest-centroid prototype classifier ----
     var protos = amz_proto_fit(X, n, d, y, k);
+    if (protos == 0) { puts("  amz_proto_fit refused\n"); return 2; }
     var acc = amz_proto_accuracy(protos, k, d, X, n, y);
     puts("  prototype accuracy: "); print_pct(acc); puts("%\n");
 
+    # A NaN purity or accuracy (a refusal) fails every f64_gt, so it fails the gate.
     var thresh = f64_div(f64_from(95), f64_from(100));
     if ((mono == 1) && (f64_gt(purity, thresh) == 1) && (f64_gt(acc, thresh) == 1)) {
         puts("  M0 GATE PASS: monotone inertia + purity > 95% + accuracy > 95%\n");

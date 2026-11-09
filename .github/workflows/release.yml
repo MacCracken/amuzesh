@@ -4,8 +4,10 @@ on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+*']
 
+# Read-only by default. Only the release job, which publishes, gets contents: write, so
+# the CI gate it calls never holds a write token.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -16,8 +18,14 @@ jobs:
     name: Build & Release
     needs: [ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+      # Pinned to a full commit SHA, as in ci.yml. persist-credentials false: git archive
+      # needs no token, and the curl | sh installer below runs in this write-holding job.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — the release-integrity hardening item)
+        with:
+          persist-credentials: false
 
       - name: Verify version consistency
         # VERSION is the single source of truth; cyrius.cyml derives it
@@ -75,7 +83,7 @@ jobs:
             || sha256sum "$NAME-$TAG.tar.gz" > SHA256SUMS
 
       - name: Create release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned — CVE-21)
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned — the release-integrity hardening item)
         with:
           name: "${{ github.event.repository.name }} ${{ github.ref_name }}"
           body_path: /tmp/release-body.md

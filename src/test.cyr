@@ -3,6 +3,7 @@
 
 include "lib/syscalls.cyr"
 
+# The [build].test entry: the unit suite lives in tests/amuzesh.tcyr, so this exits 0.
 fn main() {
     return 0;
 }

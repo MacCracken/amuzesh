@@ -19,4 +19,9 @@ Decisions about amuzesh — what we chose, the context, and the consequences we 
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-amuzesh-scope-and-substrate.md) | amuzesh scope and substrate | Accepted |
+| [0002](0002-failure-vocabulary-and-validation.md) | Validate every public entry point, and fail in ganita's vocabulary | Accepted |
+| [0003](0003-direct-row-access.md) | Read ganita rows through one row-address helper, pinned by a test | Accepted |
+| [0004](0004-empty-class-has-no-prototype.md) | A class with no training rows has no prototype | Accepted |

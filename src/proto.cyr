@@ -4,59 +4,86 @@
 # training rows labeled c; a query is classified to the nearest prototype. Equivalent
 # to LDA under equal isotropic covariance — the supervised counterpart to k-means.
 #
-# Include AFTER lib/ganita.cyr, src/dist.cyr.
+# A class with NO training rows has no mean, so it has no prototype: its row is NaN and
+# it is never predicted (ADR 0004). Every public function validates its arguments and
+# fails in the vocabulary of src/check.cyr (ADR 0002).
+#
+# Include AFTER lib/ganita.cyr, src/dist.cyr, src/check.cyr.
 
-# Fit: prototype[c] = mean of rows with y==c, stored as row c of a C×D ganita matrix.
-# A class with zero training rows keeps the zero prototype (never selected on real data).
+# Fit: prototype[c] = mean of the rows of X (n×d) with y == c, stored as row c of a
+# ncls×d ganita matrix; a class with no rows gets a NaN row. y holds n labels in
+# [0, ncls). RETURNS the prototype matrix, or 0 for a bad shape, ncls < 1, a label
+# outside [0, ncls), a non-finite entry of X, or an allocation failure.
 fn amz_proto_fit(X, n, d, y, ncls): i64 {
+    if (_amz_mat_ok(X, n, d) == 0) { return 0; }
+    if (ncls < 1) { return 0; }
+    if (_amz_labels_ok(y, n, ncls) == 0) { return 0; }
+    if (_amz_mat_finite(X, n, d) == 0) { return 0; }
     var protos = ganita_mat_new(ncls, d);
-    var counts = alloc(ncls * 8);
+    var counts = _amz_alloc_words(ncls);
+    if ((protos == 0) || (counts == 0)) { return 0; }
+    # The running means are written straight into the matrix's ncls·d data words.
+    _amz_label_means(X, n, d, y, ncls, _amz_row(protos, 0), counts);
     var j = 0;
-    while (j < ncls) { store64(counts + j * 8, 0); j = j + 1; }
-    var i = 0; var c = 0; var lab = 0;
-    i = 0;
-    while (i < n) {
-        lab = load64(y + i * 8);
-        c = 0;
-        while (c < d) {
-            ganita_mat_set(protos, lab, c, f64_add(ganita_mat_get(protos, lab, c), ganita_mat_get(X, i, c)));
-            c = c + 1;
-        }
-        store64(counts + lab * 8, load64(counts + lab * 8) + 1);
-        i = i + 1;
-    }
-    var cnt = 0; var inv = 0;
-    j = 0;
     while (j < ncls) {
-        cnt = load64(counts + j * 8);
-        if (cnt > 0) {
-            inv = f64_div(f64_from(1), f64_from(cnt));
-            c = 0;
-            while (c < d) { ganita_mat_set(protos, j, c, f64_mul(ganita_mat_get(protos, j, c), inv)); c = c + 1; }
-        }
+        if (load64(counts + j * 8) == 0) { _amz_fill_words(_amz_row(protos, j), d, AMZ_NAN); }   # ADR 0004
         j = j + 1;
     }
     return protos;
 }
 
-# Predict: argmin_c sqdist(query, prototype_c), where query is row rx of matrix Xq.
-fn amz_proto_predict(protos, ncls, d, Xq, rx): i64 {
-    var best = 0; var bestd = amz_sqdist(Xq, rx, protos, 0, d);
-    var c = 1;
+# Kernel: the class whose prototype is nearest the d-value query row at address q, ties
+# to the lowest index. A class whose distance is NaN (it has no prototype) never wins.
+# After the first candidate, distances use partial-distance search (_amz_sqdist_lt): a NaN
+# row stops at its first coordinate and is still skipped.
+# RETURNS the class, or AMZ_ERR_ARG when no class has a prototype.
+# Precondition: protos is validated (ncls×d) and the query row is finite.
+fn _amz_proto_nearest(protos, ncls, d, q): i64 {
+    var stride = d * 8;
+    var pc = _amz_row(protos, 0);
+    var best = AMZ_ERR_ARG;
+    var bestd = 0;
+    var c = 0;
     while (c < ncls) {
-        var dc = amz_sqdist(Xq, rx, protos, c, d);
-        if (f64_lt(dc, bestd) == 1) { bestd = dc; best = c; }
+        var dc = 0;
+        if (best < 0) { dc = _amz_sqdist_ptr(q, pc, d); } else { dc = _amz_sqdist_lt(q, pc, d, bestd); }
+        if (_amz_is_nan(dc) == 0) {
+            if ((best < 0) || (f64_lt(dc, bestd) == 1)) { best = c; bestd = dc; }
+        }
+        pc = pc + stride;
         c = c + 1;
     }
     return best;
 }
 
-# Accuracy over a labeled set (X n×d, y labels): RETURNS f64 fraction correct.
+# Predict: argmin_c sqdist(query, prototype_c), where the query is row rx of matrix Xq
+# (d columns). RETURNS the class in [0, ncls), or AMZ_ERR_ARG for a bad shape, rx out of
+# range, a non-finite query, or a prototype set in which no class has a prototype.
+fn amz_proto_predict(protos, ncls, d, Xq, rx): i64 {
+    if (_amz_mat_ok(protos, ncls, d) == 0) { return AMZ_ERR_ARG; }
+    if ((rx < 0) || (_amz_mat_ok(Xq, rx + 1, d) == 0)) { return AMZ_ERR_ARG; }
+    var q = _amz_row(Xq, rx);
+    if (_amz_words_finite(q, d) == 0) { return AMZ_ERR_ARG; }
+    return _amz_proto_nearest(protos, ncls, d, q);
+}
+
+# Accuracy over a labeled set (X n×d, y labels in [0, ncls)). RETURNS the f64 fraction
+# predicted correctly, or NaN for a bad shape, a label outside [0, ncls), a non-finite
+# entry of X, or a prototype set in which no class has a prototype.
 fn amz_proto_accuracy(protos, ncls, d, X, n, y): i64 {
+    if (_amz_mat_ok(protos, ncls, d) == 0) { return AMZ_NAN; }
+    if (_amz_mat_ok(X, n, d) == 0) { return AMZ_NAN; }
+    if (_amz_labels_ok(y, n, ncls) == 0) { return AMZ_NAN; }
+    if (_amz_mat_finite(X, n, d) == 0) { return AMZ_NAN; }
+    var stride = d * 8;
+    var px = _amz_row(X, 0);
     var ok = 0;
     var i = 0;
     while (i < n) {
-        if (amz_proto_predict(protos, ncls, d, X, i) == load64(y + i * 8)) { ok = ok + 1; }
+        var cls = _amz_proto_nearest(protos, ncls, d, px);
+        if (cls < 0) { return AMZ_NAN; }
+        if (cls == load64(y + i * 8)) { ok = ok + 1; }
+        px = px + stride;
         i = i + 1;
     }
     return f64_div(f64_from(ok), f64_from(n));
