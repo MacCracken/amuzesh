@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-09
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** No source change. `cyrius lib sync --full` re-vendored
+  the whole 6.6.20 snapshot: `lib/` now byte-matches it (113 files), clearing the 12-module
+  `./lib/ shadows version-pinned` warning that the 6.6.2 bump had left in place. New in the
+  snapshot: `alloc_cx`, `boxed`, `hashseed`, `poison`, `tls_hostid`. Nothing was dropped, so
+  there was nothing to prune.
+- **`[deps.ganita]` `1.1.0` → `1.2.14`** — the version the 6.6.20 snapshot bundles; the tag's
+  `dist/ganita.cyr` is byte-identical to the toolchain's `lib/ganita.cyr`. No public signature
+  changed across 1.2.x. amuzesh calls only `ganita_mat_new` / `_get` / `_set`.
+- **`[deps.tyche]` `1.0.1` → `1.1.1`** — the tyche release built against 6.6.20. `rng_seed`,
+  `rng_u64` and `rng_uniform` (the k-means++ draw) are bit-identical. 1.1.0's portable-log
+  `rng_normal` moves 0.011% of x86_64 draws by 1–3 ulp; it feeds only the blob generator's
+  jitter, and the demo output is byte-identical to the 6.6.2 run.
+- **`cyrius.lock` regenerated** — 114 files plus the two commit pins, and
+  `cyrius deps --verify` is clean. Neither `cyrius deps` nor `cyrius deps --relock` prunes a
+  superseded commit pin, so the lock was rebuilt from scratch. Otherwise it would have kept
+  the dead `ganita 1.1.0` / `tyche 1.0.1` lines next to the new ones.
+- Suite **23/23** and the M0 demo gate pass, both unchanged; the bench and fuzz stubs pass.
+  Bare `cyrius test` now reports `2 passed`: it counts the `[build].test` stub
+  (`src/test.cyr`) along with `tests/amuzesh.tcyr`. The binary grows from 146,928 to
+  286,560 B, almost all of it from ganita 1.2.14's larger bundle (52 KB → 238 KB of source),
+  most of which is unreachable here (DCE off).
+
 ## [0.1.2] - 2026-09-11
 
 ### Changed
