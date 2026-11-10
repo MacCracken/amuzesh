@@ -46,22 +46,47 @@ cyrius build src/main.cyr build/amuzesh     # compile the demo
 ./build/amuzesh
 cyrius test                                 # run the unit suite (tests/amuzesh.tcyr)
 CYRIUS_DCE=1 cyrius bench tests/amuzesh.bcyr  # benchmarks (scripts/bench-history.sh records them)
+cyrius distlib                              # regenerate dist/amuzesh.cyr after changing src/
 ```
 
-A consumer includes `lib/ganita.cyr`, `lib/tyche.cyr`, then `src/dist.cyr`, `src/check.cyr`,
-`src/kmeans.cyr`, `src/proto.cyr` (and `src/data.cyr` for the fixtures), in that order.
+## Using amuzesh
+
+The library ships as one bundle, `dist/amuzesh.cyr`. A consumer declares it next to the two
+substrate libraries it builds on, and `cyrius deps` resolves all three (in any order):
+
+```toml
+# a consumer's cyrius.cyml
+[deps.ganita]
+git = "https://github.com/MacCracken/ganita"
+tag = "1.2.15"
+modules = ["dist/ganita.cyr"]
+
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "1.2.2"
+modules = ["dist/tyche.cyr"]
+
+[deps.amuzesh]
+git = "https://github.com/MacCracken/amuzesh"
+tag = "0.3.0"
+modules = ["dist/amuzesh.cyr"]
+```
+
+Source files then call `amz_*` directly: the build prepends the deps. Without the build
+tool, include `lib/ganita.cyr`, `lib/tyche.cyr`, then `dist/amuzesh.cyr`. The bundle's
+own `# Requires` block brings the stdlib leaf it needs.
 
 ## Documentation
 
 - [`docs/api.md`](docs/api.md) — the public surface and its contract
 - [`docs/adr/`](docs/adr/) — decisions; [`docs/architecture/`](docs/architecture/) — constraints
 - [`docs/benchmarks.md`](docs/benchmarks.md) · [`docs/sources.md`](docs/sources.md) — performance, citations
-- [`docs/audit/`](docs/audit/) — audit reports (latest: 2026-11-09, the P(-1) sweep)
+- [`docs/audit/`](docs/audit/) — audit reports (the 0.2.2 P(-1) sweep; the 0.3.0 pre-minor pass)
 
 ## Roadmap
 
-[`docs/development/roadmap.md`](docs/development/roadmap.md): **0.3.x** a consumable
-`dist/amuzesh.cyr` bundle, **0.4.x** the first downstream consumer green, **0.5.x** the
+[`docs/development/roadmap.md`](docs/development/roadmap.md): **0.3.0** shipped the
+consumable `dist/amuzesh.cyr` bundle; next, **0.4.x** the first downstream consumer green, **0.5.x** the
 API review and the pre-freeze audit, **1.0.0** the freeze. Further classical mechanisms —
 linear / ridge, PCA, logistic regression (IRLS), naive Bayes, Kalman / HMM filters,
 gradient-boosted trees (the *auditable* phylax/aegis form) — are in its v1 backlog, mapped

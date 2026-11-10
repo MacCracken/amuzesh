@@ -4,6 +4,11 @@
 # them (matrix storage, PRNG) comes from ganita + tyche. All values are f64 bit
 # patterns stored in i64 (the everything-is-i64 family convention).
 #
+# This is the first module of dist/amuzesh.cyr (`cyrius distlib`). A consumer of the
+# bundle supplies ganita and tyche itself, before the bundle: declare `[deps.ganita]` and
+# `[deps.tyche]` (cyrius deps then prepends lib/ganita.cyr and lib/tyche.cyr), or include
+# those two files first. The bundle's `# Requires` block brings the stdlib leaves it needs.
+#
 # ⚠ UNCHECKED BY DESIGN. Every function in this file is an inner-loop kernel: it does
 # no bounds, null or finiteness test, exactly like ganita_mat_get / ganita_mat_set.
 # The public entry points in kmeans.cyr / proto.cyr / data.cyr validate their

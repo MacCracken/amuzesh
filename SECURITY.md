@@ -51,4 +51,4 @@ it. Sandboxing belongs to the platform (kavach), not to this library.
 
 ## Audits
 
-[`docs/audit/`](docs/audit/). Latest: [2026-11-09](docs/audit/2026-11-09-audit.md).
+[`docs/audit/`](docs/audit/). Latest: [2026-11-09, 0.3.0](docs/audit/2026-11-09-v0.3.0-audit.md); the full sweep: [2026-11-09, 0.2.2](docs/audit/2026-11-09-audit.md).

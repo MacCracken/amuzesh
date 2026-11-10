@@ -1,0 +1,34 @@
+# amuzesh raw-include test — a downstream consumer compiles from the bundle.
+#
+# Includes ONLY what a consumer has: the two named deps it declares (ganita, tyche),
+# dist/amuzesh.cyr, and the test framework after them. No stdlib leaf is named here; the
+# bundle's `# Requires` block (dist/amuzesh.deps) brings its own. `cyrius test` runs this
+# file too, but it prepends the manifest's [deps].stdlib, which would hide a bundle that
+# under-declares. CI therefore also builds it with `cyrius build --no-deps`, where these
+# includes are the only source in scope. The full suite runs against the bundle in
+# scripts/consumer-check.sh.
+
+include "lib/ganita.cyr"
+include "lib/tyche.cyr"
+include "dist/amuzesh.cyr"
+include "lib/assert.cyr"
+
+# Fit, classify and refuse through the bundle alone.
+fn main(): i64 {
+    alloc_init();
+    var n_per = 20; var d = 2; var k = 3; var n = k * n_per;
+    var X = ganita_mat_new(n, d);
+    var y = alloc(n * 8);
+    assert(amz_make_blobs(n_per, d, k, 7, X, y) == n, "make_blobs through the bundle");
+    var m = amz_kmeans_fit(X, n, d, k, 50, 1337);
+    assert((m != 0) && (amz_model_converged(m) == 1), "k-means fits and converges through the bundle");
+    assert(f64_gt(amz_purity(amz_model_labels(m), y, n, k, k), f64_div(f64_from(9), f64_from(10))) == 1,
+      "purity > 90% through the bundle");
+    var P = amz_proto_fit(X, n, d, y, k);
+    assert(amz_proto_predict(P, k, d, X, 0) == load64(y), "the prototype classifier predicts through the bundle");
+    assert(amz_kmeans_fit(X, n, d, 0, 50, 1) == 0, "the refusal contract holds through the bundle");
+    return assert_summary();
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

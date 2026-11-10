@@ -12,6 +12,15 @@ entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "build/amuzesh"
 
+# `cyrius distlib` concatenates [lib].modules, in this order (the include order, since
+# cyrius is single-pass), into dist/amuzesh.cyr: the one file a consumer includes, via
+# `[deps.amuzesh] modules = ["dist/amuzesh.cyr"]`, after ganita's and tyche's bundles.
+# src/data.cyr (the amz_make_blobs fixture) ships in the bundle; whether it stays public
+# API is the 0.5.x freeze review's call. main.cyr (the M0 demo) and test.cyr are excluded:
+# they carry main() + SYS_EXIT, not library surface.
+[lib]
+modules = ["src/dist.cyr", "src/check.cyr", "src/kmeans.cyr", "src/proto.cyr", "src/data.cyr"]
+
 # Unlike the deep-learning siblings (attn11 / tarka / tentib / prajna), amuzesh carries
 # NO finite-difference gradient gate: k-means / prototype are not gradient methods.
 # Correctness is proven by convergence (monotone inertia + fixed-point labels),

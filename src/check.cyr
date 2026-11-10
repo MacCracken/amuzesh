@@ -18,6 +18,11 @@
 #
 # Include AFTER lib/ganita.cyr, src/dist.cyr.
 
+# The allocator is amuzesh's own direct need (alloc, ALLOC_MAX), so it is named here:
+# `cyrius distlib` starts dist/amuzesh.deps from the includes the bundled modules keep,
+# and its verify would otherwise credit the leaf to ganita, whose bundle also brings it.
+include "lib/alloc.cyr"
+
 var AMZ_ERR_ALLOC = 0 - 1;               # an allocation failed
 var AMZ_ERR_ARG = 0 - 2;                 # an argument broke the contract (null, shape, range, NaN)
 var AMZ_NAN = 0x7FF8000000000000;        # quiet NaN: the f64 failure value

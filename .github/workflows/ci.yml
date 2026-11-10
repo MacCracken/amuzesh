@@ -24,7 +24,7 @@ jobs:
     steps:
       # Pinned to a full commit SHA (a tag can be moved). persist-credentials false keeps
       # the token out of .git/config, where the curl | sh installer below could read it.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — the release-integrity hardening item)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned: a tag can be moved)
         with:
           persist-credentials: false
 
@@ -94,6 +94,17 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Distribution — bundle is current
+        # dist/amuzesh.cyr is the product consumers import ([deps.amuzesh] modules =
+        # ["dist/amuzesh.cyr"]). --check compares bytes and writes nothing, so a commit that
+        # changes src/ without regenerating the bundle fails here.
+        run: cyrius distlib --check
+
+      - name: Distribution — a consumer can use it
+        # The raw include compiles with --no-deps from the two named deps alone, and the whole
+        # unit suite and the fuzz harness pass against the bundle instead of src/.
+        run: ./scripts/consumer-check.sh "${RUNNER_TEMP}/consumer-check"
 
       - name: Fuzz
         run: |

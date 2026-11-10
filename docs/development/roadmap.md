@@ -2,7 +2,8 @@
 
 > The sequencing from 0.3.x to the 1.0.0 freeze, and the backlog after it. Current
 > state lives in [`state.md`](state.md); what already shipped lives in
-> [`CHANGELOG.md`](../../CHANGELOG.md) (0.1.0 M0 → 0.2.2 P(-1) sweep).
+> [`CHANGELOG.md`](../../CHANGELOG.md) (0.1.0 M0 → 0.2.2 P(-1) sweep → 0.3.0 the
+> consumable `dist/amuzesh.cyr` bundle).
 
 amuzesh grows by pull, not push ([ADR 0001](../adr/0001-amuzesh-scope-and-substrate.md)).
 The road to 1.0.0 therefore freezes the surface that exists, k-means(++) and the
@@ -33,31 +34,18 @@ the [v1 backlog](#v1-backlog) for a consumer that needs them.
   benchmarks re-stamped with `scripts/bench-history.sh`, and findings filed in `docs/audit/`.
 - **Toolchain and dependency realigns ride patches**, by the procedure in [`state.md`](state.md).
 
-## 0.3.x — A consumable library
+## 0.3.x — patches
 
-Today a consumer includes five `src/` files in a fixed order. Sibling libraries (ganita,
-tyche, rosnet) ship one bundle. No gate: ready to start.
-
-- **`dist/amuzesh.cyr`**: a `[lib]` modules list in `cyrius.cyml` and a `cyrius distlib`
-  bundle of `dist`, `check`, `kmeans` and `proto`, with a compile-verified `# Requires`
-  block. Decide whether the `data.cyr` fixtures ship in the bundle or as a profile.
-- **A raw-include test** built with `cyrius build --no-deps`, so the bundle compiles from
-  its own includes alone (the ganita 1.2.14 lesson).
-- **CI distlib drift check**: regenerate and `git diff --exit-code dist/`, so a release
-  never ships a bundle that lags `src/`.
-- **README, `docs/api.md` and the getting-started guide** switch to the one-include form.
-  The demo binary stays.
-- **CI actions to their current SHA-pinned releases** (checkout v7.0.1, gh-release v3.0.3,
-  as tyche moved on 2026-11-04).
-
-**Done when:** a scratch consumer that includes only `lib/ganita.cyr`, `lib/tyche.cyr` and
-`dist/amuzesh.cyr` passes the suite, and CI holds the bundle in sync.
+Toolchain and dependency realigns as they come, by the release rules above. The bundle is
+regenerated with each one (its header carries the version).
 
 ## 0.4.x — First consumer green
 
 **Gate:** a consumer pulls. The lane plan names the likely first movers: phylax / aegis
 (auditable threat-feature models), and ifran-side classification over external
-embeddings (the 2026-06-25 product mining). None depends on amuzesh yet.
+embeddings (the 2026-06-25 product mining). None depends on amuzesh yet. The integration
+path exists since 0.3.0: `[deps.amuzesh] modules = ["dist/amuzesh.cyr"]` next to ganita and
+tyche ([`docs/api.md`](../api.md)).
 
 - Integrate with that consumer on a tagged amuzesh release, its suite green in its own CI.
 - Add the additive API its real use surfaces, judged against what it actually needs.
@@ -82,7 +70,9 @@ embeddings (the 2026-06-25 product mining). None depends on amuzesh yet.
     `_amz_` private;
   - whether the 9-slot model layout is part of the contract or reachable only through the
     accessors;
-  - the `AMZ_*` constants, including the `AMZ_KMEANS_MAX_ITER` policy cap.
+  - the `AMZ_*` constants, including the `AMZ_KMEANS_MAX_ITER` policy cap;
+  - whether the `amz_make_blobs` fixture stays in `dist/amuzesh.cyr` (it ships there since
+    0.3.0) or moves to a `[lib.fixtures]` profile.
 - **Pre-freeze P(-1) sweep**: the full audit again, including mutation testing and both
   architectures. The standards require one before the v1.0 freeze.
 - **`docs/api.md` marked frozen** and the 1.x rules written into it.

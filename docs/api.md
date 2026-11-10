@@ -1,23 +1,45 @@
 # amuzesh API
 
-The public surface as of 0.2.2. amuzesh is 0.x: this surface is not frozen.
+The public surface as of 0.3.0. amuzesh is 0.x: this surface is not frozen.
 
 ## Including amuzesh
 
-Consumers include the source modules in this order, after the two substrate bundles
-(`cyrius deps` resolves them into `lib/`):
+The library is one bundle, `dist/amuzesh.cyr` (since 0.3.0), built by `cyrius distlib`
+from `src/dist.cyr`, `src/check.cyr`, `src/kmeans.cyr`, `src/proto.cyr` and
+`src/data.cyr`. amuzesh builds on ganita (matrices) and tyche (the PRNG), which a consumer
+declares itself, as with rosnet's tyche dependency:
 
-```cyrius
-include "lib/ganita.cyr"    # matrix storage
-include "lib/tyche.cyr"     # PRNG (k-means++, blobs)
-include "src/dist.cyr"      # row access + distance kernels (unchecked)
-include "src/check.cyr"     # validation + the failure vocabulary
-include "src/kmeans.cyr"    # k-means++, Lloyd, the model, purity
-include "src/proto.cyr"     # nearest-centroid classifier
-include "src/data.cyr"      # synthetic blobs (tests, demos)
+```toml
+# a consumer's cyrius.cyml
+[deps.ganita]
+git = "https://github.com/MacCracken/ganita"
+tag = "1.2.15"
+modules = ["dist/ganita.cyr"]
+
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "1.2.2"
+modules = ["dist/tyche.cyr"]
+
+[deps.amuzesh]
+git = "https://github.com/MacCracken/amuzesh"
+tag = "0.3.0"
+modules = ["dist/amuzesh.cyr"]
 ```
 
-The stdlib leaves amuzesh needs are declared in `cyrius.cyml` `[deps].stdlib`.
+`cyrius deps` resolves the three into `lib/` and the build prepends them, in any order.
+Without the build tool, include them in dependency order:
+
+```cyrius
+include "lib/ganita.cyr"     # matrix storage
+include "lib/tyche.cyr"      # PRNG (k-means++, blobs)
+include "dist/amuzesh.cyr"   # amuzesh; its # Requires block includes lib/alloc.cyr
+```
+
+The bundle's stdlib needs are listed in `dist/amuzesh.deps` (the allocator). Everything
+else it calls comes from ganita and tyche. CI proves both forms: the raw include builds
+with `--no-deps`, and the whole suite and fuzz harness pass against the bundle
+(`scripts/consumer-check.sh`).
 
 ## Conventions
 
